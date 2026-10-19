@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package battleship.internal.v1;
+
+service InternalHealthService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  string service = 1;
+  string node_id = 2;
+  bool ready = 3;
+}

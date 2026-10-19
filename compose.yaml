@@ -1,0 +1,225 @@
+name: ${COMPOSE_PROJECT_NAME:-battleship}
+
+x-topology-environment: &topology-environment
+  HTTP_PORT: "8080"
+  GRPC_PORT: "9090"
+  AUTH_HTTP_ENDPOINT: http://auth-service:8080
+  AUTH_GRPC_ENDPOINT: auth-service:9090
+  CONTROL_HTTP_ENDPOINTS: http://control-node-1:8080,http://control-node-2:8080,http://control-node-3:8080
+  CONTROL_GRPC_PEERS: control-node-1:9090,control-node-2:9090,control-node-3:9090
+  BACKEND_GRPC_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
+
+x-node-healthcheck: &node-healthcheck
+  test:
+    - CMD
+    - node
+    - -e
+    - fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+  interval: 3s
+  timeout: 2s
+  retries: 20
+  start_period: 10s
+
+x-control-environment: &control-environment
+  <<: *topology-environment
+  SERVICE_NAME: control-plane
+  DATABASE_PATH: /data/control.db
+  RAFT_PEERS: control-node-1:9090,control-node-2:9090,control-node-3:9090
+
+x-backend-environment: &backend-environment
+  <<: *topology-environment
+  SERVICE_NAME: raft-backend
+  DATABASE_PATH: /data/game.db
+  RAFT_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
+
+x-control-common: &control-common
+  image: battleship/control-plane:dev
+  build:
+    context: .
+    dockerfile: apps/control-plane/Dockerfile
+    target: dev
+  restart: unless-stopped
+  depends_on:
+    auth-service:
+      condition: service_healthy
+  expose:
+    - "8080"
+    - "9090"
+  networks:
+    - battleship-net
+  healthcheck: *node-healthcheck
+
+x-backend-common: &backend-common
+  image: battleship/raft-node:dev
+  build:
+    context: .
+    dockerfile: apps/raft-node/Dockerfile
+    target: dev
+  restart: unless-stopped
+  depends_on:
+    control-node-1:
+      condition: service_healthy
+    control-node-2:
+      condition: service_healthy
+    control-node-3:
+      condition: service_healthy
+  expose:
+    - "8080"
+    - "9090"
+  networks:
+    - battleship-net
+  healthcheck: *node-healthcheck
+
+services:
+  auth-service:
+    image: battleship/auth-service:dev
+    container_name: battleship-auth-service
+    build:
+      context: .
+      dockerfile: apps/auth-service/Dockerfile
+      target: dev
+    restart: unless-stopped
+    environment:
+      <<: *topology-environment
+      SERVICE_NAME: auth-service
+      NODE_ID: auth-node-1
+      DATABASE_PATH: /data/auth.db
+    volumes:
+      - ./apps/auth-service/src:/workspace/apps/auth-service/src:ro
+      - ./runtime/auth:/data
+    expose:
+      - "8080"
+      - "9090"
+    networks:
+      - battleship-net
+    healthcheck: *node-healthcheck
+
+  control-node-1:
+    <<: *control-common
+    container_name: battleship-control-node-1
+    environment:
+      <<: *control-environment
+      NODE_ID: control-node-1
+    volumes:
+      - ./apps/control-plane/src:/workspace/apps/control-plane/src:ro
+      - ./runtime/control/control-node-1:/data
+
+  control-node-2:
+    <<: *control-common
+    container_name: battleship-control-node-2
+    environment:
+      <<: *control-environment
+      NODE_ID: control-node-2
+    volumes:
+      - ./apps/control-plane/src:/workspace/apps/control-plane/src:ro
+      - ./runtime/control/control-node-2:/data
+
+  control-node-3:
+    <<: *control-common
+    container_name: battleship-control-node-3
+    environment:
+      <<: *control-environment
+      NODE_ID: control-node-3
+    volumes:
+      - ./apps/control-plane/src:/workspace/apps/control-plane/src:ro
+      - ./runtime/control/control-node-3:/data
+
+  backend-node-1:
+    <<: *backend-common
+    container_name: battleship-backend-node-1
+    environment:
+      <<: *backend-environment
+      NODE_ID: backend-node-1
+    volumes:
+      - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./runtime/backend/backend-node-1:/data
+
+  backend-node-2:
+    <<: *backend-common
+    container_name: battleship-backend-node-2
+    environment:
+      <<: *backend-environment
+      NODE_ID: backend-node-2
+    volumes:
+      - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./runtime/backend/backend-node-2:/data
+
+  backend-node-3:
+    <<: *backend-common
+    container_name: battleship-backend-node-3
+    environment:
+      <<: *backend-environment
+      NODE_ID: backend-node-3
+    volumes:
+      - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./runtime/backend/backend-node-3:/data
+
+  frontend:
+    image: battleship/frontend:dev
+    container_name: battleship-frontend
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      target: dev
+    restart: unless-stopped
+    environment:
+      VITE_HMR_CLIENT_PORT: ${VITE_HMR_CLIENT_PORT:-8000}
+    depends_on:
+      backend-node-1:
+        condition: service_healthy
+      backend-node-2:
+        condition: service_healthy
+      backend-node-3:
+        condition: service_healthy
+    volumes:
+      - ./apps/frontend:/workspace/apps/frontend:ro
+    expose:
+      - "5173"
+    networks:
+      - battleship-net
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:5173').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+
+  gateway:
+    image: battleship/gateway:dev
+    container_name: battleship-gateway
+    build:
+      context: .
+      dockerfile: infra/nginx/Dockerfile
+    restart: unless-stopped
+    environment:
+      FRONTEND_PORT: "5173"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      control-node-1:
+        condition: service_healthy
+      control-node-2:
+        condition: service_healthy
+      control-node-3:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    ports:
+      - "${GATEWAY_PORT:-8000}:80"
+    networks:
+      - battleship-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/gateway-healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+networks:
+  battleship-net:
+    name: battleship-net
+    driver: bridge

@@ -1,0 +1,19 @@
+{
+  "name": "battleship",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@battleship/protocol && npm run build --workspace=@battleship/auth-service && npm run build --workspace=@battleship/control-plane && npm run build --workspace=@battleship/raft-node && npm run build --workspace=@battleship/frontend",
+    "clean": "npm run clean --workspaces --if-present",
+    "docker:build": "docker compose build",
+    "docker:build:prod": "docker compose -f compose.prod.yaml build"
+  },
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
+  }
+}
