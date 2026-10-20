@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { authorizeUser } from "@battleship/auth-token";
 import { startInternalGrpcServer } from "@battleship/protocol";
 import Database from "better-sqlite3";
 import express from "express";
@@ -29,6 +30,8 @@ const app = express();
 app.get("/healthz", (_request, response) => {
   response.status(ready ? 200 : 503).json({ service: serviceName, nodeId, ready });
 });
+
+app.use(authorizeUser);
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 

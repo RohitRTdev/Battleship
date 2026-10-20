@@ -1,6 +1,7 @@
 name: ${COMPOSE_PROJECT_NAME:-battleship}
 
 x-topology-environment: &topology-environment
+  JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
   HTTP_PORT: "8080"
   GRPC_PORT: "9090"
   AUTH_HTTP_ENDPOINT: http://auth-service:8080
@@ -84,6 +85,7 @@ services:
       SERVICE_NAME: auth-service
       NODE_ID: auth-node-1
       DATABASE_PATH: /data/auth.db
+      ENABLE_TEST_ROUTES: ${ENABLE_TEST_ROUTES:-false}
     volumes:
       - ./apps/auth-service/src:/workspace/apps/auth-service/src:ro
       - ./runtime/auth:/data

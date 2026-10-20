@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { authorizeUser } from "@battleship/auth-token";
 import { startInternalGrpcServer } from "@battleship/protocol";
 import Database from "better-sqlite3";
 import express from "express";
@@ -31,11 +32,13 @@ app.get("/healthz", (_request, response) => {
   response.status(ready ? 200 : 503).json({ service: serviceName, nodeId, ready });
 });
 
+app.use(authorizeUser);
+
 app.all("/api/backend/{*path}", (request, response) => {
   response.status(request.path === "/api/backend/_stub" ? 200 : 501).json({
     service: serviceName,
     handledBy: nodeId,
-    authorizationReceived: Boolean(request.headers.authorization),
+    user: request.user,
     message: "Control-plane routes are not implemented yet."
   });
 });

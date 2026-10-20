@@ -12,7 +12,7 @@
   "scripts": {
     "generate": "proto-loader-gen-types --longs=String --enums=String --defaults --keepCase --oneofs --grpcLib=@grpc/grpc-js --importFileExtension=.js --outDir=src/generated src/internal.proto",
     "build": "npm run generate && tsc -p tsconfig.json && node scripts/copy-proto.mjs",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+    "clean": "node -e \"const fs=require('node:fs');for(const path of ['dist','src/generated'])fs.rmSync(path,{recursive:true,force:true})\""
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.6",

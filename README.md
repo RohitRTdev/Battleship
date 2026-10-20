@@ -1,57 +1,56 @@
-# Battleship service scaffold
+## Requirements
 
-This repository contains a Docker-first local scaffold for the Battleship system. It deliberately contains only health, storage, routing, and gRPC connectivity placeholders.
+- Docker v28
+- Node.js v24, npm v11
+- Python v3.13
+- A POSIX environment to run commands (Git bash, WSL, Msys2, Linux, MacOS)
 
-## Topology
+## Run the project
 
-- One public nginx gateway on `http://localhost:8000`
-- One React frontend
-- One authentication service
-- Three control-plane nodes
-- Three private backend Raft nodes
-- One SQLite database per database-backed container
+Start the development environment:
 
-Only the gateway publishes a host port. All HTTP and gRPC communication between services uses the `battleship-net` Docker network.
-
-## Start and stop development
-
-```bash
-docker compose up --build --detach --wait
-docker compose down --remove-orphans
+```sh
+./setup.sh up
 ```
 
-Development runs TypeScript through `tsx --watch` and React through Vite. Source directories are bind-mounted; dependencies stay inside the images. Visit `http://localhost:8000`.
+This creates `.env` when needed, generates a JWT secret, enables development test routes, builds the containers, and waits for them to become healthy. The application is then available at:
 
-## Start and stop the production-like environment
-
-```bash
-docker compose -f compose.prod.yaml up --build --detach --wait
-docker compose -f compose.prod.yaml down --remove-orphans
+```text
+http://localhost:8000
 ```
 
-Production-like containers run compiled JavaScript. The frontend is built by Vite and served by an internal nginx container.
+Start with production-safe settings:
 
-## Placeholder routes
-
-- `GET /` serves the frontend.
-- `GET /api/auth/_stub` reaches the auth service.
-- `GET /api/backend/_stub` is load-balanced across the control-plane nodes.
-- `GET /gateway-healthz` checks the public gateway.
-
-The backend Raft nodes intentionally have no public route.
-
-## Persistence
-
-SQLite files are created below `runtime/` and are ignored by Git. Compose teardown preserves them. Delete that directory only when an explicit full data reset is intended.
-
-## Workspace commands
-
-```bash
-npm ci
-npm run build
-npm run typecheck
-npm run clean
+```sh
+./setup.sh up prod
 ```
 
-Use `npm install` when adding or changing dependencies. Docker builds use `npm ci` so dependency versions match `package-lock.json` exactly.
+Stop the project:
 
+```sh
+./setup.sh down
+```
+
+Show command usage:
+
+```sh
+./setup.sh help
+```
+
+## Test bots
+
+The `scripts/` folder contains reusable Python helpers and bot scripts for exercising the running services.
+
+For Example: Run authentication smoke test
+
+```sh
+python scripts/auth_smoke.py
+```
+
+By default, it concurrently registers and logs in 50 uniquely named bots, then prints all registered user IDs, usernames, and creation timestamps.
+
+Run a larger swarm:
+
+```sh
+python scripts/auth_smoke.py --count 120 --workers 40
+```

@@ -7,10 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@battleship/protocol && npm run build --workspace=@battleship/auth-service && npm run build --workspace=@battleship/control-plane && npm run build --workspace=@battleship/raft-node && npm run build --workspace=@battleship/frontend",
-    "clean": "npm run clean --workspaces --if-present",
-    "docker:build": "docker compose build",
-    "docker:build:prod": "docker compose -f compose.prod.yaml build"
+    "build": "npm run build --workspace=@battleship/protocol && npm run build --workspace=@battleship/auth-token && npm run build --workspace=@battleship/auth-service && npm run build --workspace=@battleship/control-plane && npm run build --workspace=@battleship/raft-node && npm run build --workspace=@battleship/frontend",
+    "clean": "npm run clean --workspaces --if-present"
   },
   "engines": {
     "node": ">=24 <25",
