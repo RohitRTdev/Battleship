@@ -1,8 +1,5 @@
 FROM node:24-bookworm-slim AS dependencies
 WORKDIR /workspace
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 make g++ \
-    && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY apps/raft-node/package.json apps/raft-node/package.json
 COPY packages/auth-token/package.json packages/auth-token/package.json
@@ -31,9 +28,6 @@ RUN npm run build --workspace=@battleship/protocol \
 FROM node:24-bookworm-slim AS production
 WORKDIR /workspace
 ENV NODE_ENV=production
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
-    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace/node_modules node_modules
 COPY --from=build /workspace/apps/raft-node/package.json apps/raft-node/package.json
 COPY --from=build /workspace/apps/raft-node/dist apps/raft-node/dist
@@ -41,8 +35,6 @@ COPY --from=build /workspace/packages/auth-token/package.json packages/auth-toke
 COPY --from=build /workspace/packages/auth-token/dist packages/auth-token/dist
 COPY --from=build /workspace/packages/protocol/package.json packages/protocol/package.json
 COPY --from=build /workspace/packages/protocol/dist packages/protocol/dist
-COPY infra/node/production-entrypoint.sh /usr/local/bin/battleship-entrypoint
-RUN chmod +x /usr/local/bin/battleship-entrypoint \
-    && chown -R node:node /workspace
-ENTRYPOINT ["battleship-entrypoint"]
+RUN chown -R node:node /workspace
+USER node
 CMD ["node", "apps/raft-node/dist/main.js"]

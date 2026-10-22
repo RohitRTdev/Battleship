@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Control users in a development Battleship auth database through its API."""
+"""Manage users in a development Battleship auth database through its API."""
 
 from __future__ import annotations
 
@@ -28,13 +28,13 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  python scripts/control_db.py add
-  python scripts/control_db.py add --username admiral --password secret
-  python scripts/control_db.py list
-  python scripts/control_db.py delete admiral
-  python scripts/control_db.py delete 3
-  python scripts/control_db.py delete-all
-  python scripts/control_db.py delete-all --yes
+  python scripts/auth_users.py add
+  python scripts/auth_users.py add --username admiral --password secret
+  python scripts/auth_users.py list
+  python scripts/auth_users.py delete admiral
+  python scripts/auth_users.py delete 3
+  python scripts/auth_users.py delete-all
+  python scripts/auth_users.py delete-all --yes
 
 The list and delete commands require ENABLE_TEST_ROUTES=true on the auth service.
 """,

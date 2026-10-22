@@ -6,8 +6,6 @@ x-topology-environment: &topology-environment
   GRPC_PORT: "9090"
   AUTH_HTTP_ENDPOINT: http://auth-service:8080
   AUTH_GRPC_ENDPOINT: auth-service:9090
-  CONTROL_HTTP_ENDPOINTS: http://control-node-1:8080,http://control-node-2:8080,http://control-node-3:8080
-  CONTROL_GRPC_PEERS: control-node-1:9090,control-node-2:9090,control-node-3:9090
   BACKEND_GRPC_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
 
 x-node-healthcheck: &node-healthcheck
@@ -21,34 +19,11 @@ x-node-healthcheck: &node-healthcheck
   retries: 20
   start_period: 10s
 
-x-control-environment: &control-environment
-  <<: *topology-environment
-  SERVICE_NAME: control-plane
-  DATABASE_PATH: /data/control.db
-  RAFT_PEERS: control-node-1:9090,control-node-2:9090,control-node-3:9090
-
 x-backend-environment: &backend-environment
   <<: *topology-environment
   SERVICE_NAME: raft-backend
-  DATABASE_PATH: /data/game.db
+  DATABASE_URL: postgresql://${POSTGRES_USER:-battleship}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-battleship}
   RAFT_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
-
-x-control-common: &control-common
-  image: battleship/control-plane:production
-  build:
-    context: .
-    dockerfile: apps/control-plane/Dockerfile
-    target: production
-  restart: unless-stopped
-  depends_on:
-    auth-service:
-      condition: service_healthy
-  expose:
-    - "8080"
-    - "9090"
-  networks:
-    - battleship-net
-  healthcheck: *node-healthcheck
 
 x-backend-common: &backend-common
   image: battleship/raft-node:production
@@ -58,11 +33,7 @@ x-backend-common: &backend-common
     target: production
   restart: unless-stopped
   depends_on:
-    control-node-1:
-      condition: service_healthy
-    control-node-2:
-      condition: service_healthy
-    control-node-3:
+    postgres:
       condition: service_healthy
   expose:
     - "8080"
@@ -94,32 +65,26 @@ services:
       - battleship-net
     healthcheck: *node-healthcheck
 
-  control-node-1:
-    <<: *control-common
-    container_name: battleship-control-node-1
+  postgres:
+    image: postgres:17-bookworm
+    container_name: battleship-postgres
+    restart: unless-stopped
     environment:
-      <<: *control-environment
-      NODE_ID: control-node-1
+      POSTGRES_DB: ${POSTGRES_DB:-battleship}
+      POSTGRES_USER: ${POSTGRES_USER:-battleship}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
-      - ./runtime/control/control-node-1:/data
-
-  control-node-2:
-    <<: *control-common
-    container_name: battleship-control-node-2
-    environment:
-      <<: *control-environment
-      NODE_ID: control-node-2
-    volumes:
-      - ./runtime/control/control-node-2:/data
-
-  control-node-3:
-    <<: *control-common
-    container_name: battleship-control-node-3
-    environment:
-      <<: *control-environment
-      NODE_ID: control-node-3
-    volumes:
-      - ./runtime/control/control-node-3:/data
+      - ./runtime/postgres:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    networks:
+      - battleship-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
 
   backend-node-1:
     <<: *backend-common
@@ -127,8 +92,6 @@ services:
     environment:
       <<: *backend-environment
       NODE_ID: backend-node-1
-    volumes:
-      - ./runtime/backend/backend-node-1:/data
 
   backend-node-2:
     <<: *backend-common
@@ -136,8 +99,6 @@ services:
     environment:
       <<: *backend-environment
       NODE_ID: backend-node-2
-    volumes:
-      - ./runtime/backend/backend-node-2:/data
 
   backend-node-3:
     <<: *backend-common
@@ -145,8 +106,6 @@ services:
     environment:
       <<: *backend-environment
       NODE_ID: backend-node-3
-    volumes:
-      - ./runtime/backend/backend-node-3:/data
 
   frontend:
     image: battleship/frontend:production
@@ -186,11 +145,11 @@ services:
     depends_on:
       auth-service:
         condition: service_healthy
-      control-node-1:
+      backend-node-1:
         condition: service_healthy
-      control-node-2:
+      backend-node-2:
         condition: service_healthy
-      control-node-3:
+      backend-node-3:
         condition: service_healthy
       frontend:
         condition: service_healthy

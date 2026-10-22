@@ -1,34 +1,59 @@
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { authorizeUser } from "@battleship/auth-token";
 import { startInternalGrpcServer } from "@battleship/protocol";
-import Database from "better-sqlite3";
 import express from "express";
+import { Pool } from "pg";
 
 const serviceName = process.env.SERVICE_NAME ?? "raft-backend";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
 const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
-const databasePath = process.env.DATABASE_PATH ?? "/data/game.db";
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required");
+}
 
 let ready = false;
-mkdirSync(dirname(databasePath), { recursive: true });
+let databaseReady = false;
+let shuttingDown = false;
 
-const database = new Database(databasePath);
-database.pragma("journal_mode = WAL");
-database.pragma("synchronous = FULL");
-database.pragma("user_version = 0");
+const database = new Pool({
+  connectionString: databaseUrl,
+  connectionTimeoutMillis: 2_000,
+  query_timeout: 2_000
+});
+
+database.on("error", (error) => {
+  databaseReady = false;
+  console.error("PostgreSQL pool error", error);
+});
+
+await database.query("SELECT 1");
+databaseReady = true;
 
 const grpcServer = await startInternalGrpcServer(grpcPort, {
   serviceName,
   nodeId,
-  isReady: () => ready
+  isReady: () => ready && databaseReady
 });
 
 const app = express();
 
-app.get("/healthz", (_request, response) => {
-  response.status(ready ? 200 : 503).json({ service: serviceName, nodeId, ready });
+app.get("/healthz", async (_request, response) => {
+  try {
+    await database.query("SELECT 1");
+    databaseReady = true;
+  } catch {
+    databaseReady = false;
+  }
+
+  const healthy = ready && databaseReady;
+  response.status(healthy ? 200 : 503).json({
+    service: serviceName,
+    nodeId,
+    ready: healthy,
+    databaseReady
+  });
 });
 
 app.use(authorizeUser);
@@ -45,11 +70,16 @@ ready = true;
 console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} and gRPC ${grpcPort}`);
 
 function shutdown(): void {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
   ready = false;
+  databaseReady = false;
   httpServer.close(() => {
     grpcServer.tryShutdown(() => {
-      database.close();
-      process.exit(0);
+      void database.end().finally(() => process.exit(0));
     });
   });
 }

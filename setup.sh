@@ -22,6 +22,18 @@ setup_env() {
     echo "JWT_SECRET=$secret" >> ".env"
   fi
 
+  if ! grep -q '^POSTGRES_PASSWORD=.' ".env"; then
+    echo "Adding PostgreSQL password to local environment file..."
+    postgres_password=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
+    if grep -q '^POSTGRES_PASSWORD=' ".env"; then
+      temporary_env=".env.tmp.$$"
+      sed "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$postgres_password/" ".env" > "$temporary_env"
+      mv "$temporary_env" ".env"
+    else
+      echo "POSTGRES_PASSWORD=$postgres_password" >> ".env"
+    fi
+  fi
+
   if grep -q '^ENABLE_TEST_ROUTES=' ".env"; then
     temporary_env=".env.tmp.$$"
     sed "s/^ENABLE_TEST_ROUTES=.*/ENABLE_TEST_ROUTES=$test_routes_enabled/" ".env" > "$temporary_env"
@@ -66,7 +78,11 @@ case "$command" in
     echo "Generating protocol files for the host workspace..."
     npm run build --workspace=@battleship/protocol
     echo "Starting Docker Compose..."
-    docker compose up --build --detach --wait
+    if [ "$test_routes_enabled" = false ]; then
+      docker compose -f compose.prod.yaml up --build --detach --wait
+    else
+      docker compose up --build --detach --wait
+    fi
     ;;
   down)
     echo "Stopping containers..."

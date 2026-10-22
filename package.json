@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@battleship/protocol && npm run build --workspace=@battleship/auth-token && npm run build --workspace=@battleship/auth-service && npm run build --workspace=@battleship/control-plane && npm run build --workspace=@battleship/raft-node && npm run build --workspace=@battleship/frontend",
+    "build": "npm run build --workspace=@battleship/protocol && npm run build --workspace=@battleship/auth-token && npm run build --workspace=@battleship/auth-service && npm run build --workspace=@battleship/raft-node && npm run build --workspace=@battleship/frontend",
     "clean": "npm run clean --workspaces --if-present"
   },
   "engines": {
