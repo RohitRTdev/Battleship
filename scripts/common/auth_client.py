@@ -33,14 +33,23 @@ class UserSummary:
     created_at: str
 
 
-def _parse_response_body(raw_body: bytes) -> Any:
+def _parse_response_body(
+    raw_body: bytes,
+    status_code: int | None = None,
+) -> Any:
     if not raw_body:
-        return None
+        raise AuthClientError(
+            "Auth service returned an empty response instead of JSON",
+            status_code=status_code,
+        )
 
     try:
         return json.loads(raw_body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return raw_body.decode("utf-8", errors="replace")
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise AuthClientError(
+            "Auth service returned a response that was not valid JSON",
+            status_code=status_code,
+        ) from error
 
 
 def _post_json(url: str, payload: dict[str, str]) -> tuple[int, Any]:
@@ -55,11 +64,12 @@ def _post_json(url: str, payload: dict[str, str]) -> tuple[int, Any]:
     try:
         with urlopen(request, timeout=10) as response:
             raw_body = response.read()
-            parsed_body = _parse_response_body(raw_body)
+            parsed_body = _parse_response_body(raw_body, response.status)
             return response.status, parsed_body
     except HTTPError as error:
         raw_body = error.read()
-        details = raw_body.decode("utf-8", errors="replace") or error.reason
+        parsed_body = _parse_response_body(raw_body, error.code)
+        details = json.dumps(parsed_body, separators=(",", ":"))
         raise AuthClientError(
             f"Auth request failed with HTTP {error.code}: {details}",
             status_code=error.code,
@@ -86,11 +96,12 @@ def _request_json(
     try:
         with urlopen(request, timeout=10) as response:
             raw_body = response.read()
-            parsed_body = _parse_response_body(raw_body)
+            parsed_body = _parse_response_body(raw_body, response.status)
             return response.status, parsed_body
     except HTTPError as error:
         raw_body = error.read()
-        details = raw_body.decode("utf-8", errors="replace") or error.reason
+        parsed_body = _parse_response_body(raw_body, error.code)
+        details = json.dumps(parsed_body, separators=(",", ":"))
         raise AuthClientError(
             f"Auth request failed with HTTP {error.code}: {details}",
             status_code=error.code,
@@ -103,7 +114,7 @@ def register(base_url: str, username: str, password: str) -> bool:
     """Register a user, returning False when the username already exists."""
 
     try:
-        status, _ = _post_json(
+        status, payload = _post_json(
             f"{base_url.rstrip('/')}/api/auth/register",
             {"username": username, "password": password},
         )
@@ -112,7 +123,11 @@ def register(base_url: str, username: str, password: str) -> bool:
             return False
         raise
 
-    if status != 201:
+    if (
+        status != 201
+        or not isinstance(payload, dict)
+        or payload.get("created") is not True
+    ):
         raise AuthClientError(f"Registration returned unexpected HTTP {status}")
     return True
 
