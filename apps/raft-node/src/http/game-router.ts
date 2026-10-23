@@ -140,6 +140,7 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
   });
 
   router.get("/games/:gameCode/updates", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
     const code = gameCode(request, response); if (!code) return;
     const afterVersion = Number(request.query.afterVersion);
     if (!Number.isSafeInteger(afterVersion) || afterVersion < 0) {

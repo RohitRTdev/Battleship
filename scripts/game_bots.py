@@ -9,14 +9,15 @@ import json
 import os
 import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from common.auth_client import login, register
+from common.bot_names import DEFAULT_NAME_FILE, bot_password, claim_bot_names
 
 
 FLEET = {
@@ -104,10 +105,9 @@ class ApiClient:
             raise AssertionError(f"{method} {path}: expected {code}, got {actual}")
 
 
-def make_bot(base_url: str, username: str) -> Bot:
-    password = f"bot-{uuid.uuid4().hex}"
-    if not register(base_url, username, password):
-        raise AssertionError(f"Unexpected duplicate bot username: {username}")
+def make_bot(base_url: str, username: str, password_seed: str) -> Bot:
+    password = bot_password(username, password_seed)
+    register(base_url, username, password)
     return Bot(username, login(base_url, username, password).access_token)
 
 
@@ -232,6 +232,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("BATTLESHIP_BASE_URL", "http://localhost:8000"))
     parser.add_argument("--games", type=int, default=4, help="Concurrent games to run (default: 4)")
+    parser.add_argument(
+        "--names-file",
+        type=Path,
+        default=DEFAULT_NAME_FILE,
+        help="File containing one available bot name per line",
+    )
+    parser.add_argument(
+        "--password-seed",
+        default=os.environ.get(
+            "BATTLESHIP_BOT_PASSWORD_SEED", "battleship-local-bot-seed"
+        ),
+        help="Stable seed used to recreate bot passwords across runs",
+    )
     return parser.parse_args()
 
 
@@ -240,8 +253,16 @@ def main() -> int:
     if args.games < 2:
         print("--games must be at least 2")
         return 2
-    run_id = uuid.uuid4().hex[:10]
-    bots = [make_bot(args.base_url, f"gamebot_{run_id}_{index}") for index in range(args.games * 2 + 5)]
+    bot_count = args.games * 2 + 5
+    try:
+        names = claim_bot_names(bot_count, args.names_file)
+    except (OSError, ValueError) as error:
+        print(f"Could not allocate bot names: {error}")
+        return 2
+    bots = [
+        make_bot(args.base_url, username, args.password_seed)
+        for username in names
+    ]
     outsider = bots[args.games * 2]
     client = ApiClient(args.base_url)
     failures: list[str] = []

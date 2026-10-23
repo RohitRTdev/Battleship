@@ -66,6 +66,7 @@ const grpcServer = await startInternalGrpcServer(grpcPort, {
 });
 
 const app = express();
+app.disable("etag");
 app.use(express.json({ limit: "32kb" }));
 app.use((_request, response, next) => {
   response.setHeader("X-Battleship-Node", nodeId);

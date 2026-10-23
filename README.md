@@ -54,3 +54,11 @@ Run a larger swarm:
 ```sh
 python scripts/auth_smoke.py --count 120 --workers 40
 ```
+
+Play a complete game against one bot:
+
+```sh
+python scripts/play_bot.py
+```
+
+The script creates a game and prints its eight-character join code. Join that game in the browser, place your ships, and the bot will continue playing until the match finishes. Press `Ctrl+C` to stop the bot and cancel or surrender its current game.
