@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@battleship/game-contract": "*",
+    "aws-amplify": "^6.22.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

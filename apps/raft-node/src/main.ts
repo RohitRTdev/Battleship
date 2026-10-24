@@ -1,6 +1,7 @@
-import { authorizeUser } from "@battleship/auth-token";
+import { authorizeUser, createTokenVerifierFromEnvironment } from "@battleship/auth-token";
 import { startInternalGrpcServer } from "@battleship/protocol";
 import express from "express";
+import path from "node:path";
 import { Pool } from "pg";
 import { runMigrations } from "./database/migrations.js";
 import { GameRepository } from "./database/game-repository.js";
@@ -12,9 +13,12 @@ const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
 const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
 const databaseUrl = process.env.DATABASE_URL;
+const tokenVerifier = await createTokenVerifierFromEnvironment();
+const production = process.env.APP_ENV === "prod";
+const frontendDirectory = path.resolve(process.cwd(), "apps/frontend/dist");
 
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL is required");
+if (!databaseUrl && !(process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE)) {
+  throw new Error("DATABASE_URL or PostgreSQL PG* environment variables are required");
 }
 
 let ready = false;
@@ -22,7 +26,7 @@ let databaseReady = false;
 let shuttingDown = false;
 
 const database = new Pool({
-  connectionString: databaseUrl,
+  ...(databaseUrl ? { connectionString: databaseUrl } : {}),
   connectionTimeoutMillis: 2_000,
   query_timeout: 2_000
 });
@@ -90,8 +94,20 @@ app.get("/healthz", async (_request, response) => {
   });
 });
 
-app.use(authorizeUser);
-app.use("/api/backend", createGameRouter(repository, updates));
+if (production) {
+  app.get("/config.json", (_request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    response.json({
+      environment: "prod",
+      region: process.env.AWS_REGION,
+      userPoolId: process.env.COGNITO_USER_POOL_ID,
+      userPoolClientId: process.env.COGNITO_APP_CLIENT_ID
+    });
+  });
+  app.use(express.static(frontendDirectory));
+}
+
+app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(repository, updates));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {

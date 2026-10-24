@@ -1,6 +1,7 @@
 name: ${COMPOSE_PROJECT_NAME:-battleship}
 
 x-topology-environment: &topology-environment
+  APP_ENV: dev
   JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
   HTTP_PORT: "8080"
   GRPC_PORT: "9090"

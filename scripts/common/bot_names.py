@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """Creative identity allocation shared by Battleship test bots."""
 
 from __future__ import annotations

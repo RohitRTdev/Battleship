@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """Create a Battleship game and play it as a bot against one human player."""
 
 from __future__ import annotations
@@ -15,7 +13,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from common.auth_client import AuthClientError, login, register
+from common.auth_client import AuthClientError, configure_production, login, register
 from common.bot_names import DEFAULT_NAME_FILE, bot_password, claim_bot_names
 
 
@@ -253,6 +251,7 @@ def run_bot(client: GameClient, rng: random.Random) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prod", action="store_true", help="Use the deployed Cognito environment")
     parser.add_argument(
         "--base-url",
         default=os.environ.get("BATTLESHIP_BASE_URL", "http://localhost:8000"),
@@ -277,6 +276,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.prod:
+        args.base_url = configure_production()
     rng: random.Random = random.Random(args.seed) if args.seed is not None else random.SystemRandom()
     try:
         username = claim_bot_names(1, args.names_file)[0]

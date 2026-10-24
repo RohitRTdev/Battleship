@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
-
 """Registration and login helpers for Battleship test bots."""
 
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -28,9 +29,56 @@ class LoginResult:
 
 @dataclass(frozen=True)
 class UserSummary:
-    id: int
+    id: int | str
     username: str
     created_at: str
+
+
+_production: dict[str, str] | None = None
+
+
+def configure_production(path: Path = Path(".deployment/prod.json")) -> str:
+    """Use the deployed Cognito pool and return its public application URL."""
+    global _production
+    env_path = Path(".env")
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"AWS_PROFILE", "AWS_REGION"} and value:
+                os.environ.setdefault(key, value)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AuthClientError(
+            f"Could not read {path}; run ./setup.sh up prod first"
+        ) from error
+    required = ("url", "region", "userPoolId", "userPoolClientId")
+    if not isinstance(payload, dict) or any(not isinstance(payload.get(key), str) for key in required):
+        raise AuthClientError(f"{path} does not contain valid production outputs")
+    _production = {key: payload[key] for key in required}
+    return _production["url"]
+
+
+def is_production() -> bool:
+    return _production is not None
+
+
+def _cognito_client(admin: bool = False):
+    try:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
+    except ImportError as error:
+        raise AuthClientError("Production scripts require: pip install -r scripts/requirements.txt") from error
+    assert _production is not None
+    return boto3.client(
+        "cognito-idp",
+        region_name=_production["region"],
+        config=Config(
+            **({} if admin else {"signature_version": UNSIGNED}),
+            retries={"mode": "standard", "max_attempts": 10},
+        ),
+    )
 
 
 def _parse_response_body(
@@ -113,6 +161,8 @@ def _request_json(
 def register(base_url: str, username: str, password: str) -> bool:
     """Register a user, returning False when the username already exists."""
 
+    if _production is not None:
+        return False
     try:
         status, payload = _post_json(
             f"{base_url.rstrip('/')}/api/auth/register",
@@ -133,6 +183,17 @@ def register(base_url: str, username: str, password: str) -> bool:
 
 
 def login(base_url: str, username: str, password: str) -> LoginResult:
+    if _production is not None:
+        try:
+            response = _cognito_client().initiate_auth(
+                AuthFlow="USER_PASSWORD_AUTH",
+                ClientId=_production["userPoolClientId"],
+                AuthParameters={"USERNAME": username, "PASSWORD": password},
+            )
+            result = response.get("AuthenticationResult", {})
+            return LoginResult(result["AccessToken"], result.get("TokenType", "Bearer"), result["ExpiresIn"])
+        except Exception as error:
+            raise AuthClientError(f"Cognito login failed for {username}: {error}") from error
     status, payload = _post_json(
         f"{base_url.rstrip('/')}/api/auth/login",
         {"username": username, "password": password},
@@ -158,6 +219,15 @@ def login(base_url: str, username: str, password: str) -> LoginResult:
 
 
 def list_users(base_url: str, access_token: str | None = None) -> list[UserSummary]:
+    if _production is not None:
+        client = _cognito_client(admin=True)
+        users: list[UserSummary] = []
+        paginator = client.get_paginator("list_users")
+        for page in paginator.paginate(UserPoolId=_production["userPoolId"]):
+            for raw in page.get("Users", []):
+                attributes = {item["Name"]: item["Value"] for item in raw.get("Attributes", [])}
+                users.append(UserSummary(attributes.get("sub", raw["Username"]), raw["Username"], raw["UserCreateDate"].isoformat()))
+        return users
     status, payload = _request_json(
         f"{base_url.rstrip('/')}/api/auth/_test/users",
         "GET",
@@ -195,6 +265,51 @@ def delete_user(base_url: str, user_id: int) -> None:
     )
     if status != 200:
         raise AuthClientError(f"User deletion returned unexpected HTTP {status}")
+
+
+def _provision_user(client: Any, username: str, password: str) -> None:
+    assert _production is not None
+    try:
+        client.admin_create_user(UserPoolId=_production["userPoolId"], Username=username, MessageAction="SUPPRESS")
+    except client.exceptions.UsernameExistsException:
+        pass
+    client.admin_set_user_password(UserPoolId=_production["userPoolId"], Username=username, Password=password, Permanent=True)
+
+
+def provision_user(username: str, password: str) -> None:
+    if _production is None:
+        raise AuthClientError("Production authentication is not configured")
+    _provision_user(_cognito_client(admin=True), username, password)
+
+
+def provision_users(users: Iterable[tuple[str, str]], max_workers: int = 8) -> Iterator[str]:
+    """Provision Cognito users concurrently and yield usernames as they finish."""
+
+    if _production is None:
+        raise AuthClientError("Production authentication is not configured")
+    if max_workers < 1:
+        raise AuthClientError("Provisioning worker count must be at least one")
+
+    client = _cognito_client(admin=True)
+
+    def provision(entry: tuple[str, str]) -> str:
+        username, password = entry
+        try:
+            _provision_user(client, username, password)
+            return username
+        except Exception as error:
+            raise AuthClientError(f"Could not provision {username}: {error}") from error
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(provision, entry) for entry in users]
+        for future in as_completed(futures):
+            yield future.result()
+
+
+def delete_production_user(username: str) -> None:
+    if _production is None:
+        raise AuthClientError("Production authentication is not configured")
+    _cognito_client(admin=True).admin_delete_user(UserPoolId=_production["userPoolId"], Username=username)
 
 
 def delete_all_users(base_url: str) -> int:

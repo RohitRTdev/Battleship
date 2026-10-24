@@ -2,36 +2,20 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { createRoot } from "react-dom/client";
 import type { AttackView, ConnectionStatus, Coordinate, PlayerGameView, PlayerSummary } from "@battleship/game-contract";
-import { ApiFailure, api } from "./api";
+import { ApiFailure, SessionExpiredError, createApi } from "./api";
+import { authenticationErrorMessage, createAuthProvider, type AuthProvider, type UserSession } from "./auth";
 import { BOARD_SIZE, FLEET, autoPlaceFleet, cellsFor, toPlacements, validatePlacement } from "./fleet";
 import type { Orientation, PlacedShip } from "./fleet";
 import "./styles.css";
 
-const SESSION_KEY = "battleship.session";
 const COLUMN_LABELS = "ABCDEFGHIJ".split("");
 const CONNECTION_TIMEOUT_MS = 6_000;
 
-type Session = { token: string; username: string; expiresAt: number };
+type Session = UserSession;
 type NetworkState = "connected" | "reconnecting" | "offline";
 
-function decodeToken(token: string): { name?: string; exp?: number } | null {
-  try {
-    const encoded = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "="))) as { name?: string; exp?: number };
-  } catch { return null; }
-}
-
-function readSession(): Session | null {
-  try {
-    const stored = sessionStorage.getItem(SESSION_KEY);
-    if (!stored) return null;
-    const session = JSON.parse(stored) as Session;
-    const payload = decodeToken(session.token);
-    const expiry = payload?.exp ? payload.exp * 1000 : session.expiresAt;
-    if (!expiry || expiry <= Date.now()) { sessionStorage.removeItem(SESSION_KEY); return null; }
-    return { ...session, username: payload?.name ?? session.username, expiresAt: expiry };
-  } catch { sessionStorage.removeItem(SESSION_KEY); return null; }
-}
+let auth: AuthProvider;
+let api: ReturnType<typeof createApi>;
 
 function coordinateKey({ row, column }: Coordinate): string { return `${row}:${column}`; }
 function delay(milliseconds: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)); }
@@ -43,9 +27,11 @@ function Brand({ compact = false }: { compact?: boolean }) {
 function ButtonSpinner() { return <span className="button-spinner" aria-hidden="true" />; }
 
 function AuthScreen({ initialNotice, onAuthenticated }: { initialNotice: string; onAuthenticated: (session: Session) => void }) {
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "confirm">("login");
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmationCode, setConfirmationCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(initialNotice);
@@ -53,27 +39,40 @@ function AuthScreen({ initialNotice, onAuthenticated }: { initialNotice: string;
   async function submit(event: FormEvent) {
     event.preventDefault();
     const cleanUsername = username.trim().toLowerCase();
-    if (!cleanUsername || !password) { setError("Enter both your username and password."); return; }
+    if (!cleanUsername || (mode !== "confirm" && !password)) { setError("Enter your username and password."); return; }
+    if (mode === "register" && auth.requiresEmail && !email.trim()) { setError("Enter your email address."); return; }
+    if (mode === "confirm" && !confirmationCode.trim()) { setError("Enter the confirmation code."); return; }
     setPending(true); setError("");
     try {
-      if (mode === "register") await api.register(cleanUsername, password);
-      const result = await api.login(cleanUsername, password);
-      const payload = decodeToken(result.access_token);
-      const next: Session = { token: result.access_token, username: payload?.name ?? cleanUsername, expiresAt: payload?.exp ? payload.exp * 1000 : Date.now() + result.expires_in * 1000 };
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
-      onAuthenticated(next);
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "Authentication failed."); }
+      if (mode === "confirm") {
+        await auth.confirmRegistration(cleanUsername, confirmationCode.trim());
+        setMode("login"); setError("Account confirmed. Sign in to continue.");
+        return;
+      }
+      if (mode === "register") {
+        const registration = await auth.register(cleanUsername, email.trim(), password);
+        if (registration.confirmationRequired) {
+          setMode("confirm");
+          setError(registration.destination ? `Enter the code sent to ${registration.destination}.` : "Enter the confirmation code sent to your email.");
+          return;
+        }
+      }
+      onAuthenticated(await auth.login(cleanUsername, password));
+    } catch (caught) { setError(auth.requiresEmail ? authenticationErrorMessage(caught) : caught instanceof Error ? caught.message : "Authentication failed."); }
     finally { setPending(false); }
   }
 
   return <main className="auth-shell"><section className="auth-panel"><div className="auth-card">
-      <div className="auth-mobile-brand"><Brand compact /></div><h2>{mode === "login" ? "Login" : "Register"}</h2><p className="muted">{mode === "login" ? "Sign in to continue." : "Create an account to start playing."}</p>
-      <div className="segmented" role="tablist" aria-label="Authentication mode"><button className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setError(""); }} role="tab" aria-selected={mode === "login"}>Sign in</button><button className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setError(""); }} role="tab" aria-selected={mode === "register"}>Register</button></div>
+      <div className="auth-mobile-brand"><Brand compact /></div><h2>{mode === "login" ? "Login" : mode === "register" ? "Register" : "Confirm account"}</h2><p className="muted">{mode === "login" ? "Sign in to continue." : mode === "register" ? "Create an account to start playing." : "Enter the code sent to your email."}</p>
+      {mode !== "confirm" && <div className="segmented" role="tablist" aria-label="Authentication mode"><button className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setError(""); }} role="tab" aria-selected={mode === "login"}>Sign in</button><button className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setError(""); }} role="tab" aria-selected={mode === "register"}>Register</button></div>}
       <form onSubmit={submit} className="auth-form">
         <label>Username<span className="input-wrap"><input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Username" maxLength={32} /></span></label>
-        <label>Password<span className="input-wrap"><input type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" /><button type="button" className="reveal" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></span></label>
+        {mode === "register" && auth.requiresEmail && <label>Email<span className="input-wrap"><input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email" /></span></label>}
+        {mode !== "confirm" && <label>Password<span className="input-wrap"><input type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" /><button type="button" className="reveal" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></span></label>}
+        {mode === "confirm" && <label>Confirmation code<span className="input-wrap"><input inputMode="numeric" autoComplete="one-time-code" value={confirmationCode} onChange={(event) => setConfirmationCode(event.target.value)} placeholder="Confirmation code" /></span></label>}
         {error && <div className="form-error" role="alert"><span>!</span>{error}</div>}
-        <button className="button button--primary button--wide" disabled={pending}>{pending && <ButtonSpinner />}{mode === "login" ? "Sign in" : "Create account"}</button>
+        <button className="button button--primary button--wide" disabled={pending}>{pending && <ButtonSpinner />}{mode === "login" ? "Sign in" : mode === "register" ? "Create account" : "Confirm account"}</button>
+        {mode === "confirm" && <button type="button" className="text-button" onClick={() => void auth.resendConfirmation(username.trim().toLowerCase()).then(() => setError("A new confirmation code was sent.")).catch((caught) => setError(authenticationErrorMessage(caught)))}>Resend code</button>}
       </form>
     </div></section>
   </main>;
@@ -175,9 +174,9 @@ function ConnectionOverlay({ state, onRetry, onLogout }: { state: Exclude<Networ
 function ConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) { function keyDown(event: KeyboardEvent<HTMLDivElement>) { if (event.key === "Escape") onCancel(); } return <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onKeyDown={keyDown}><div className="dialog-icon">!</div><h2 id="confirm-title">Surrender the game?</h2><p>The other player will win. This cannot be undone.</p><div className="button-row"><button className="button button--ghost" autoFocus onClick={onCancel}>Keep playing</button><button className="button button--danger" onClick={onConfirm}>Surrender</button></div></div></div>; }
 
 function App() {
-  const [session, setSession] = useState<Session | null>(() => readSession());
+  const [session, setSession] = useState<Session | null>(null);
   const [game, setGame] = useState<PlayerGameView | null>(null);
-  const [booting, setBooting] = useState(Boolean(session));
+  const [booting, setBooting] = useState(true);
   const [busy, setBusy] = useState(""); const [error, setError] = useState(""); const [authNotice, setAuthNotice] = useState("");
   const [network, setNetwork] = useState<NetworkState>(navigator.onLine ? "connected" : "offline");
   const [connectionBlocked, setConnectionBlocked] = useState(false);
@@ -194,10 +193,12 @@ function App() {
     }
     setGame((current) => current?.gameCode === next.gameCode && current.version > next.version ? current : next);
   }, []);
-  const logout = useCallback((notice = "") => { sessionStorage.removeItem(SESSION_KEY); setSession(null); setGame(null); pollGameCode.current = null; pollVersion.current = 0; setBooting(false); setBusy(""); setError(""); setAuthNotice(notice); setConnectionBlocked(false); }, []);
-  const handleFailure = useCallback((caught: unknown, fallback: string) => { if (caught instanceof ApiFailure && caught.status === 401) { logout("Your session expired. Sign in again to continue."); return; } setError(caught instanceof Error ? caught.message : fallback); }, [logout]);
+  const logout = useCallback((notice = "") => { void auth.logout(); setSession(null); setGame(null); pollGameCode.current = null; pollVersion.current = 0; setBooting(false); setBusy(""); setError(""); setAuthNotice(notice); setConnectionBlocked(false); }, []);
+  const handleFailure = useCallback((caught: unknown, fallback: string) => { if (caught instanceof SessionExpiredError || (caught instanceof ApiFailure && caught.status === 401)) { logout("Your session expired. Sign in again to continue."); return; } setError(caught instanceof Error ? caught.message : fallback); }, [logout]);
 
-  useEffect(() => { if (!session) return; let active = true; void (async () => { setBooting(true); try { const state = await api.playerState(session.token); if (!active) return; setNetwork("connected"); setConnectionBlocked(false); if (state.state === "PLAYING") { const response = await api.getGame(session.token, state.gameCode); if (active) applyGame(response.game); } } catch (caught) { if (active) { setNetwork(navigator.onLine ? "reconnecting" : "offline"); handleFailure(caught, "Could not restore your game."); } } finally { if (active) setBooting(false); } })(); return () => { active = false; }; }, [session, retryNonce, handleFailure, applyGame]);
+  useEffect(() => { let active = true; void auth.restoreSession().then((restored) => { if (active) setSession(restored); }).finally(() => { if (active) setBooting(false); }); return () => { active = false; }; }, []);
+
+  useEffect(() => { if (!session) return; let active = true; void (async () => { setBooting(true); try { const state = await api.playerState(); if (!active) return; setNetwork("connected"); setConnectionBlocked(false); if (state.state === "PLAYING") { const response = await api.getGame(state.gameCode); if (active) applyGame(response.game); } } catch (caught) { if (active) { setNetwork(navigator.onLine ? "reconnecting" : "offline"); handleFailure(caught, "Could not restore your game."); } } finally { if (active) setBooting(false); } })(); return () => { active = false; }; }, [session, retryNonce, handleFailure, applyGame]);
   useEffect(() => { const offline = () => setNetwork("offline"); const online = () => { setNetwork("reconnecting"); setRetryNonce((value) => value + 1); }; window.addEventListener("offline", offline); window.addEventListener("online", online); return () => { window.removeEventListener("offline", offline); window.removeEventListener("online", online); }; }, []);
   useEffect(() => {
     if (network !== "offline" || !game || game.status === "FINISHED") return;
@@ -220,7 +221,7 @@ function App() {
         controller = new AbortController();
         armWatchdog();
         try {
-          const update = await api.updates(session.token, game.gameCode, pollVersion.current, controller.signal);
+          const update = await api.updates(game.gameCode, pollVersion.current, controller.signal);
           window.clearTimeout(watchdog);
           if (!active) break;
           failures = 0; lastSuccessAt = Date.now(); setNetwork("connected"); setConnectionBlocked(false);
@@ -228,7 +229,7 @@ function App() {
           else { pollVersion.current = Math.max(pollVersion.current, update.version); setGame((current) => current ? { ...current, players: update.players } : current); }
         } catch (caught) {
           if (!active || (caught instanceof DOMException && caught.name === "AbortError")) break;
-          if (caught instanceof ApiFailure && caught.status === 401) { window.clearTimeout(watchdog); logout("Your session expired. Sign in again to continue."); break; }
+          if (caught instanceof SessionExpiredError || (caught instanceof ApiFailure && caught.status === 401)) { window.clearTimeout(watchdog); logout("Your session expired. Sign in again to continue."); break; }
           failures += 1;
           if (!navigator.onLine) { window.clearTimeout(watchdog); setNetwork("offline"); }
           await delay(Math.min(500 * 2 ** failures, 4000));
@@ -239,18 +240,25 @@ function App() {
   }, [session, game?.gameCode, game?.status, retryNonce, logout, applyGame]);
 
   async function runGameAction(name: string, action: () => Promise<{ game: PlayerGameView }>) { if (!session || busy) return; setBusy(name); setError(""); try { const response = await action(); applyGame(response.game); } catch (caught) { handleFailure(caught, "That action could not be completed."); } finally { setBusy(""); } }
-  async function fire(row: number, column: number) { if (!session || !game || busy || !game.isYourTurn || network !== "connected") return; setPendingShot({ row, column }); setBusy("fire"); setError(""); try { const response = await api.fire(session.token, game.gameCode, row, column); applyGame(response.game); await delay(360); } catch (caught) { handleFailure(caught, "That square could not be played."); } finally { setPendingShot(null); setBusy(""); } }
+  async function fire(row: number, column: number) { if (!session || !game || busy || !game.isYourTurn || network !== "connected") return; setPendingShot({ row, column }); setBusy("fire"); setError(""); try { const response = await api.fire(game.gameCode, row, column); applyGame(response.game); await delay(360); } catch (caught) { handleFailure(caught, "That square could not be played."); } finally { setPendingShot(null); setBusy(""); } }
 
+  if (booting && !session) return <main className="loading-screen"><ButtonSpinner /><h2>Loading…</h2></main>;
   if (!session) return <AuthScreen initialNotice={authNotice} onAuthenticated={(next) => { setSession(next); setAuthNotice(""); setBooting(true); }} />;
   let content;
   if (booting) content = <main className="loading-screen"><ButtonSpinner /><h2>Loading…</h2></main>;
-  else if (!game) content = <Lobby username={session.username} network={network} busy={busy} error={error} onCreate={() => runGameAction("create", () => api.createGame(session.token))} onJoin={(code) => runGameAction("join", () => api.joinGame(session.token, code))} />;
-  else if (game.status === "WAITING") content = <WaitingRoom game={game} busy={Boolean(busy)} error={error} onCancel={() => runGameAction("cancel", () => api.cancel(session.token, game.gameCode))} />;
-  else if (game.status === "PLACEMENT") content = <FleetPlacement game={game} busy={Boolean(busy)} error={error} onSubmit={(ships) => runGameAction("fleet", () => api.placeFleet(session.token, game.gameCode, toPlacements(ships)))} onCancel={() => runGameAction("cancel", () => api.cancel(session.token, game.gameCode))} />;
+  else if (!game) content = <Lobby username={session.username} network={network} busy={busy} error={error} onCreate={() => runGameAction("create", () => api.createGame())} onJoin={(code) => runGameAction("join", () => api.joinGame(code))} />;
+  else if (game.status === "WAITING") content = <WaitingRoom game={game} busy={Boolean(busy)} error={error} onCancel={() => runGameAction("cancel", () => api.cancel(game.gameCode))} />;
+  else if (game.status === "PLACEMENT") content = <FleetPlacement game={game} busy={Boolean(busy)} error={error} onSubmit={(ships) => runGameAction("fleet", () => api.placeFleet(game.gameCode, toPlacements(ships)))} onCancel={() => runGameAction("cancel", () => api.cancel(game.gameCode))} />;
   else content = <Battle game={game} network={network} busy={Boolean(busy)} error={error} pendingShot={pendingShot} onFire={fire} onSurrender={() => setConfirmingSurrender(true)} onLobby={() => { setGame(null); setError(""); }} />;
-  return <div className="app-frame"><AppHeader username={session.username} network={network} onLogout={() => logout()} />{content}{connectionBlocked && network !== "connected" && game && <ConnectionOverlay state={network} onRetry={() => { setNetwork(navigator.onLine ? "reconnecting" : "offline"); setRetryNonce((value) => value + 1); }} onLogout={() => logout()} />}{confirmingSurrender && <ConfirmDialog onCancel={() => setConfirmingSurrender(false)} onConfirm={() => { setConfirmingSurrender(false); void runGameAction("surrender", () => api.surrender(session.token, game!.gameCode)); }} />}</div>;
+  return <div className="app-frame"><AppHeader username={session.username} network={network} onLogout={() => logout()} />{content}{connectionBlocked && network !== "connected" && game && <ConnectionOverlay state={network} onRetry={() => { setNetwork(navigator.onLine ? "reconnecting" : "offline"); setRetryNonce((value) => value + 1); }} onLogout={() => logout()} />}{confirmingSurrender && <ConfirmDialog onCancel={() => setConfirmingSurrender(false)} onConfirm={() => { setConfirmingSurrender(false); void runGameAction("surrender", () => api.surrender(game!.gameCode)); }} />}</div>;
 }
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element was not found");
-createRoot(root).render(<StrictMode><App /></StrictMode>);
+void createAuthProvider().then((provider) => {
+  auth = provider;
+  api = createApi(auth);
+  createRoot(root).render(<StrictMode><App /></StrictMode>);
+}).catch((error: unknown) => {
+  root.textContent = error instanceof Error ? error.message : "The application could not start.";
+});

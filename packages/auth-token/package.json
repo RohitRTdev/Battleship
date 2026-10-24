@@ -20,6 +20,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "aws-jwt-verify": "^5.2.1",
     "jsonwebtoken": "^9.0.3"
   }
 }

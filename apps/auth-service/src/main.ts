@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { authorizeUser, createToken } from "@battleship/auth-token";
+import { authorizeUser, createLocalTokenVerifier, createToken } from "@battleship/auth-token";
 import { startInternalGrpcServer } from "@battleship/protocol";
 import Database from "better-sqlite3";
 import express from "express";
@@ -12,6 +12,9 @@ const nodeId = process.env.NODE_ID ?? "auth-node-1";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
 const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
 const databasePath = process.env.DATABASE_PATH ?? "/data/auth.db";
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret) throw new Error("JWT_SECRET is required");
+const tokenVerifier = createLocalTokenVerifier(jwtSecret);
 
 let ready = false;
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -192,7 +195,7 @@ app.delete("/api/auth/_test/users/:userId", (request, response) => {
 
 // Registration, login, and health checks stay public. Any auth-service routes
 // registered below this point require a valid access token.
-app.use(authorizeUser);
+app.use(authorizeUser(tokenVerifier));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {

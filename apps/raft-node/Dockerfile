@@ -19,6 +19,7 @@ RUN npm run build --workspace=@battleship/protocol \
 CMD ["npm", "run", "dev", "--workspace=@battleship/raft-node"]
 
 FROM dependencies AS build
+ADD --chmod=0444 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /workspace/rds-global-bundle.pem
 COPY tsconfig.base.json ./
 COPY packages/auth-token packages/auth-token
 COPY packages/game-contract packages/game-contract
@@ -30,9 +31,22 @@ RUN npm run build --workspace=@battleship/protocol \
     && npm run build --workspace=@battleship/raft-node \
     && npm prune --omit=dev
 
+FROM node:24-bookworm-slim AS frontend-build
+WORKDIR /workspace
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY apps/frontend/package.json apps/frontend/package.json
+COPY packages/game-contract/package.json packages/game-contract/package.json
+RUN npm ci --workspace=@battleship/frontend --workspace=@battleship/game-contract --include-workspace-root=false
+COPY apps/frontend apps/frontend
+COPY packages/game-contract packages/game-contract
+RUN npm run build --workspace=@battleship/game-contract \
+    && npm run build --workspace=@battleship/frontend
+
 FROM node:24-bookworm-slim AS production
 WORKDIR /workspace
 ENV NODE_ENV=production
+ENV NODE_EXTRA_CA_CERTS=/workspace/rds-global-bundle.pem
+COPY --from=build /workspace/rds-global-bundle.pem /workspace/rds-global-bundle.pem
 COPY --from=build /workspace/node_modules node_modules
 COPY --from=build /workspace/apps/raft-node/package.json apps/raft-node/package.json
 COPY --from=build /workspace/apps/raft-node/dist apps/raft-node/dist
@@ -42,6 +56,7 @@ COPY --from=build /workspace/packages/game-contract/package.json packages/game-c
 COPY --from=build /workspace/packages/game-contract/dist packages/game-contract/dist
 COPY --from=build /workspace/packages/protocol/package.json packages/protocol/package.json
 COPY --from=build /workspace/packages/protocol/dist packages/protocol/dist
+COPY --from=frontend-build /workspace/apps/frontend/dist apps/frontend/dist
 RUN chown -R node:node /workspace
 USER node
 CMD ["node", "apps/raft-node/dist/main.js"]

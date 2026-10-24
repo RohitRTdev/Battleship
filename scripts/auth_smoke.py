@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """Concurrently register and log in a swarm of Battleship test bots."""
 
 from __future__ import annotations
@@ -11,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from common.auth_client import AuthClientError, LoginResult, list_users, login, register
+from common.auth_client import AuthClientError, LoginResult, configure_production, is_production, list_users, login, register
 from common.bot_names import DEFAULT_NAME_FILE, bot_password, claim_bot_names
 
 
@@ -28,11 +26,14 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  python scripts/auth_smoke.py
+  python scripts/auth_smoke.py --prod
   python scripts/auth_smoke.py --count 120 --workers 40
   python scripts/auth_smoke.py --base-url http://localhost:8000
   python scripts/auth_smoke.py --names-file scripts/bot_names.txt
 """,
+    )
+    parser.add_argument(
+        "--prod", action="store_true", help="Authenticate against the deployed Cognito user pool"
     )
     parser.add_argument(
         "--base-url",
@@ -79,10 +80,15 @@ def run_bot(base_url: str, username: str, password_seed: str) -> BotResult:
 
 def main() -> int:
     args = parse_args()
+    if args.prod:
+        args.base_url = configure_production()
     if args.workers < 1:
         print("--workers must be at least one")
         return 2
 
+    if is_production():
+        print("Production users authenticated successfully (user listing requires admin mode).")
+        return 1 if failed_count else 0
     try:
         bot_names = claim_bot_names(args.count, args.names_file)
     except (OSError, ValueError) as error:

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """Run concurrent authenticated Battleship games and validate API behavior."""
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from common.auth_client import login, register
+from common.auth_client import configure_production, login, register
 from common.bot_names import DEFAULT_NAME_FILE, bot_password, claim_bot_names
 
 
@@ -230,6 +228,7 @@ def run_game(client: ApiClient, first: Bot, second: Bot, outsider: Bot) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prod", action="store_true", help="Use the deployed Cognito environment")
     parser.add_argument("--base-url", default=os.environ.get("BATTLESHIP_BASE_URL", "http://localhost:8000"))
     parser.add_argument("--games", type=int, default=4, help="Concurrent games to run (default: 4)")
     parser.add_argument(
@@ -250,6 +249,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.prod:
+        args.base_url = configure_production()
     if args.games < 2:
         print("--games must be at least 2")
         return 2
@@ -286,7 +287,10 @@ def main() -> int:
                 print(f"FAILED game {index + 1}: {error}")
     print(f"Backend nodes observed: {sorted(client.nodes)}")
     if len(client.nodes) < 2:
-        failures.append("gateway responses did not demonstrate multiple backend replicas")
+        if args.prod:
+            print("Production is currently running a single backend replica; multi-replica observation skipped")
+        else:
+            failures.append("gateway responses did not demonstrate multiple backend replicas")
     if failures:
         print("Failures:\n- " + "\n- ".join(failures))
         return 1
