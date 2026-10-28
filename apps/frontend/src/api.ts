@@ -48,7 +48,7 @@ export function createApi(auth: AuthProvider) {
 
   return {
     playerState: () => request<PlayerStateResponse>("/api/backend/player/state"),
-    getGame: (gameCode: string) => request<GameResponse>(`/api/backend/games/${gameCode}`),
+    getGame: (gameCode: string, signal?: AbortSignal) => request<GameResponse>(`/api/backend/games/${gameCode}`, { signal }),
     createGame: () => request<GameResponse>("/api/backend/games", { method: "POST", body: {} }),
     joinGame: (gameCode: string) => request<GameResponse>(`/api/backend/games/${gameCode}/join`, { method: "POST", body: {} }),
     placeFleet: (gameCode: string, ships: ShipPlacement[]) => request<GameResponse>(`/api/backend/games/${gameCode}/fleet`, { method: "PUT", body: { ships } }),
