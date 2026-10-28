@@ -1,4 +1,4 @@
-import type { Coordinate, GameErrorCode, ShipPlacement } from "@battleship/game-contract";
+import type { Coordinate, GameErrorCode, PlayerStateResponse, ShipPlacement } from "@battleship/game-contract";
 import { Router, type Request, type Response } from "express";
 import { domainError, type DomainError, type GameState, type Player, type Result } from "../game/index.js";
 import { GameRepository } from "../database/game-repository.js";
@@ -75,6 +75,60 @@ async function readParticipantGame(
 
 export function createGameRouter(repository: GameRepository, updates: GameUpdateBus): Router {
   const router = Router();
+
+  const matchmakingUpdate = (response: Response, state: PlayerStateResponse): void => {
+    if (state.state === "PLAYING") {
+      response.json({ type: "MATCH_FOUND", gameCode: state.gameCode, gameStatus: state.gameStatus });
+    } else if (state.state === "SEARCHING") {
+      response.json({ type: "HEARTBEAT", searchStartedAt: state.searchStartedAt });
+    } else {
+      response.json({ type: "NOT_SEARCHING" });
+    }
+  };
+
+  router.post("/matchmaking", async (request, response) => {
+    const result = await repository.startMatchmaking(actor(request));
+    if (!result.ok) return sendError(response, result.error);
+    response.status(result.value.state === "SEARCHING" ? 202 : 200).json(result.value);
+  });
+
+  router.delete("/matchmaking", async (request, response) => {
+    response.json(await repository.cancelMatchmaking(request.user!.id));
+  });
+
+  router.get("/matchmaking/updates", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    const playerId = request.user!.id;
+    const initial = await repository.getPlayerState(playerId);
+    if (initial.state !== "SEARCHING") return matchmakingUpdate(response, initial);
+
+    let closed = false;
+    let notified = false;
+    let wake: ((reason: "update" | "timeout" | "closed") => void) | null = null;
+    const onUpdate = () => { notified = true; wake?.("update"); };
+    const onClose = () => { closed = true; wake?.("closed"); };
+    updates.onPlayer(playerId, onUpdate);
+    response.on("close", onClose);
+
+    const secondRead = await repository.getPlayerState(playerId);
+    if (secondRead.state !== "SEARCHING") {
+      updates.offPlayer(playerId, onUpdate);
+      response.off("close", onClose);
+      return matchmakingUpdate(response, secondRead);
+    }
+
+    let reason: "update" | "timeout" | "closed" = "update";
+    if (!closed && !notified) {
+      reason = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve("timeout"), 3_000);
+        wake = (value) => { clearTimeout(timer); resolve(value); };
+      });
+    }
+    updates.offPlayer(playerId, onUpdate);
+    response.off("close", onClose);
+    if (reason === "closed" || response.writableEnded) return;
+    matchmakingUpdate(response, await repository.getPlayerState(playerId));
+  });
 
   router.post("/games", async (request, response) => {
     const result = await repository.create(actor(request));

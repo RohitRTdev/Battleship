@@ -52,6 +52,17 @@ const migrations = [
         PRIMARY KEY (game_id, player_id)
       );
     `
+  },
+  {
+    version: 2,
+    sql: `
+      CREATE TABLE matchmaking_queue (
+        queue_id BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+        player_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+      );
+    `
   }
 ] as const;
 

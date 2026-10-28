@@ -15,6 +15,7 @@ export const GAME_ERROR_CODES = [
   "INVALID_GAME_CODE",
   "GAME_NOT_FOUND",
   "PLAYER_ALREADY_PLAYING",
+  "PLAYER_ALREADY_SEARCHING",
   "PLAYER_ALREADY_IN_GAME",
   "PLAYER_NOT_IN_GAME",
   "GAME_FULL",
@@ -84,7 +85,13 @@ export type PlayerGameView = {
 
 export type PlayerStateResponse =
   | { state: "NOT_PLAYING" }
+  | { state: "SEARCHING"; searchStartedAt: string }
   | { state: "PLAYING"; gameCode: string; gameStatus: GameStatus };
+
+export type MatchmakingUpdateResponse =
+  | { type: "MATCH_FOUND"; gameCode: string; gameStatus: GameStatus }
+  | { type: "HEARTBEAT"; searchStartedAt: string }
+  | { type: "NOT_SEARCHING" };
 
 export type GameResponse = { game: PlayerGameView };
 export type FireResponse = { game: PlayerGameView; outcome: AttackView };

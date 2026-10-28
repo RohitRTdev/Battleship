@@ -1,4 +1,4 @@
-import type { FireResponse, GameResponse, PlayerStateResponse, ShipPlacement, UpdateResponse } from "@battleship/game-contract";
+import type { FireResponse, GameResponse, MatchmakingUpdateResponse, PlayerStateResponse, ShipPlacement, UpdateResponse } from "@battleship/game-contract";
 import type { AuthProvider } from "./auth";
 
 export class ApiFailure extends Error {
@@ -48,6 +48,9 @@ export function createApi(auth: AuthProvider) {
 
   return {
     playerState: () => request<PlayerStateResponse>("/api/backend/player/state"),
+    startMatchmaking: () => request<PlayerStateResponse>("/api/backend/matchmaking", { method: "POST", body: {} }),
+    cancelMatchmaking: () => request<PlayerStateResponse>("/api/backend/matchmaking", { method: "DELETE" }),
+    matchmakingUpdates: (signal: AbortSignal) => request<MatchmakingUpdateResponse>("/api/backend/matchmaking/updates", { signal }),
     getGame: (gameCode: string, signal?: AbortSignal) => request<GameResponse>(`/api/backend/games/${gameCode}`, { signal }),
     createGame: () => request<GameResponse>("/api/backend/games", { method: "POST", body: {} }),
     joinGame: (gameCode: string) => request<GameResponse>(`/api/backend/games/${gameCode}/join`, { method: "POST", body: {} }),

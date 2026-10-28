@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Pool, PoolClient } from "pg";
 
 type UpdatePayload = { gameId: string; version: number };
+type PlayerUpdatePayload = { playerId: string };
 
 export class GameUpdateBus {
   private readonly events = new EventEmitter();
@@ -24,12 +25,17 @@ export class GameUpdateBus {
     listener.on("notification", (message) => {
       if (!message.payload) return;
       try {
-        const payload = JSON.parse(message.payload) as UpdatePayload;
-        if (typeof payload.gameId === "string" && Number.isInteger(payload.version)) {
-          this.events.emit(payload.gameId, payload.version);
+        if (message.channel === "game_updates") {
+          const payload = JSON.parse(message.payload) as UpdatePayload;
+          if (typeof payload.gameId === "string" && Number.isInteger(payload.version)) {
+            this.events.emit(`game:${payload.gameId}`, payload.version);
+          }
+        } else if (message.channel === "player_state_updates") {
+          const payload = JSON.parse(message.payload) as PlayerUpdatePayload;
+          if (typeof payload.playerId === "string") this.events.emit(`player:${payload.playerId}`);
         }
       } catch {
-        console.error("Ignored malformed game_updates notification");
+        console.error(`Ignored malformed ${message.channel} notification`);
       }
     });
     listener.on("error", (error) => {
@@ -40,6 +46,7 @@ export class GameUpdateBus {
     });
     try {
       await listener.query("LISTEN game_updates");
+      await listener.query("LISTEN player_state_updates");
     } catch (error) {
       if (this.listener === listener) this.listener = null;
       listener.release(true);
@@ -59,11 +66,19 @@ export class GameUpdateBus {
   }
 
   on(gameId: string, listener: (version: number) => void): void {
-    this.events.on(gameId, listener);
+    this.events.on(`game:${gameId}`, listener);
   }
 
   off(gameId: string, listener: (version: number) => void): void {
-    this.events.off(gameId, listener);
+    this.events.off(`game:${gameId}`, listener);
+  }
+
+  onPlayer(playerId: string, listener: () => void): void {
+    this.events.on(`player:${playerId}`, listener);
+  }
+
+  offPlayer(playerId: string, listener: () => void): void {
+    this.events.off(`player:${playerId}`, listener);
   }
 
   close(): void {

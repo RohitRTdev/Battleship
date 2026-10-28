@@ -29,6 +29,16 @@ type GameRow = { id: string };
 type EventRow = { payload: PersistedCommand };
 type TimestampRow = { now: Date };
 type ConstraintError = Error & { code?: string; constraint?: string };
+type QueueRow = { player_id: string; username: string; enqueued_at: Date };
+type PlayerStateRow = {
+  activity: "PLAYING" | "SEARCHING";
+  code: string | null;
+  status: GameStatus | null;
+  enqueued_at: Date | null;
+};
+
+const MATCHMAKING_LOCK_KEY = "1947452302";
+const PLAYER_LOCK_NAMESPACE = "1947452303";
 
 export type CommandResult = { state: GameState; outcome: CommandOutcome };
 
@@ -89,6 +99,45 @@ async function notifyUpdate(client: PoolClient, state: GameState): Promise<void>
   ]);
 }
 
+async function notifyPlayerUpdate(client: PoolClient, playerId: string): Promise<void> {
+  await client.query("SELECT pg_notify('player_state_updates', $1)", [JSON.stringify({ playerId })]);
+}
+
+async function lockMatchmaking(client: PoolClient): Promise<void> {
+  await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [MATCHMAKING_LOCK_KEY]);
+}
+
+async function lockPlayer(client: PoolClient, playerId: string): Promise<void> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2::bigint))", [playerId, PLAYER_LOCK_NAMESPACE]);
+}
+
+async function isSearching(client: PoolClient, playerId: string): Promise<boolean> {
+  const result = await client.query("SELECT 1 FROM matchmaking_queue WHERE player_id = $1", [playerId]);
+  return result.rowCount !== 0;
+}
+
+async function playerState(client: PoolClient, playerId: string): Promise<PlayerStateResponse> {
+  const result = await client.query<PlayerStateRow>(
+    `SELECT 'PLAYING'::text AS activity, games.code, games.status, NULL::timestamptz AS enqueued_at, 1 AS priority
+     FROM active_player_games
+     JOIN games ON games.id = active_player_games.game_id
+     WHERE active_player_games.player_id = $1
+     UNION ALL
+     SELECT 'SEARCHING'::text, NULL, NULL, enqueued_at, 2
+     FROM matchmaking_queue
+     WHERE player_id = $1
+     ORDER BY priority
+     LIMIT 1`,
+    [playerId]
+  );
+  const row = result.rows[0];
+  if (!row) return { state: "NOT_PLAYING" };
+  if (row.activity === "SEARCHING") {
+    return { state: "SEARCHING", searchStartedAt: normalizeTime(row.enqueued_at!) };
+  }
+  return { state: "PLAYING", gameCode: row.code!, gameStatus: row.status! };
+}
+
 function failed<T>(error: DomainError): Result<T> {
   return { ok: false, error };
 }
@@ -101,6 +150,11 @@ export class GameRepository {
       const client = await this.pool.connect();
       try {
         await client.query("BEGIN");
+        await lockPlayer(client, actor.id);
+        if (await isSearching(client, actor.id)) {
+          await client.query("ROLLBACK");
+          return failed(domainError("PLAYER_ALREADY_SEARCHING"));
+        }
         const command = {
           type: "CREATE_GAME" as const,
           gameId: randomUUID(),
@@ -149,6 +203,11 @@ export class GameRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await lockPlayer(client, actor.id);
+      if (await isSearching(client, actor.id)) {
+        await client.query("ROLLBACK");
+        return failed(domainError("PLAYER_ALREADY_SEARCHING"));
+      }
       const game = await client.query<GameRow>("SELECT id FROM games WHERE code = $1 FOR UPDATE", [gameCode]);
       if (!game.rows[0]) {
         await client.query("ROLLBACK");
@@ -214,15 +273,140 @@ export class GameRepository {
   }
 
   async getPlayerState(playerId: string): Promise<PlayerStateResponse> {
-    const result = await this.pool.query<{ code: string; status: GameStatus }>(
-      `SELECT games.code, games.status
-       FROM active_player_games
-       JOIN games ON games.id = active_player_games.game_id
-       WHERE active_player_games.player_id = $1`,
-      [playerId]
-    );
-    const game = result.rows[0];
-    return game ? { state: "PLAYING", gameCode: game.code, gameStatus: game.status } : { state: "NOT_PLAYING" };
+    const client = await this.pool.connect();
+    try {
+      return await playerState(client, playerId);
+    } finally {
+      client.release();
+    }
+  }
+
+  async startMatchmaking(actor: Player): Promise<Result<PlayerStateResponse>> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await lockMatchmaking(client);
+      await lockPlayer(client, actor.id);
+      const current = await playerState(client, actor.id);
+      if (current.state === "PLAYING") {
+        await client.query("ROLLBACK");
+        return failed(domainError("PLAYER_ALREADY_PLAYING"));
+      }
+      if (current.state === "SEARCHING") {
+        await client.query("ROLLBACK");
+        return failed(domainError("PLAYER_ALREADY_SEARCHING"));
+      }
+
+      let opponent: QueueRow | undefined;
+      while (true) {
+        const queued = await client.query<QueueRow>(
+          `SELECT player_id, username, enqueued_at
+           FROM matchmaking_queue
+           ORDER BY queue_id
+           LIMIT 1
+           FOR UPDATE`,
+        );
+        opponent = queued.rows[0];
+        if (!opponent) break;
+        await lockPlayer(client, opponent.player_id);
+        const opponentState = await playerState(client, opponent.player_id);
+        if (opponentState.state === "SEARCHING") break;
+        await client.query("DELETE FROM matchmaking_queue WHERE player_id = $1", [opponent.player_id]);
+        opponent = undefined;
+      }
+
+      if (!opponent) {
+        const queued = await client.query<{ enqueued_at: Date }>(
+          `INSERT INTO matchmaking_queue (player_id, username)
+           VALUES ($1, $2)
+           RETURNING enqueued_at`,
+          [actor.id, actor.username]
+        );
+        const state: PlayerStateResponse = {
+          state: "SEARCHING",
+          searchStartedAt: normalizeTime(queued.rows[0].enqueued_at)
+        };
+        await notifyPlayerUpdate(client, actor.id);
+        await client.query("COMMIT");
+        return { ok: true, value: state };
+      }
+
+      const queuedPlayer: Player = { id: opponent.player_id, username: opponent.username };
+      let matchedState: GameState | null = null;
+      for (let attempt = 0; attempt < 8 && !matchedState; attempt += 1) {
+        const createCommand = {
+          type: "CREATE_GAME" as const,
+          gameId: randomUUID(),
+          gameCode: generateGameCode(),
+          actor: queuedPlayer,
+          occurredAt: await databaseTime(client)
+        };
+        const created = createGame(createCommand);
+        if (!created.ok) throw new Error(created.error.code);
+        const joinCommand = { type: "JOIN_GAME" as const, actor, occurredAt: await databaseTime(client) };
+        const joined = applyGameCommand(created.value.state, joinCommand);
+        if (!joined.ok) throw new Error(joined.error.code);
+        const state = joined.value.state;
+        const inserted = await client.query(
+          `INSERT INTO games (
+             id, code, status, version, player_one_id, player_one_username,
+             player_two_id, player_two_username, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (code) DO NOTHING
+           RETURNING id`,
+          [state.gameId, state.gameCode, state.status, state.version, queuedPlayer.id, queuedPlayer.username,
+            actor.id, actor.username, state.createdAt]
+        );
+        if (!inserted.rows[0]) continue;
+        await insertEvent(client, created.value.state, eventCommand(created.value.event));
+        await insertEvent(client, state, eventCommand(joined.value.event));
+        matchedState = state;
+      }
+      if (!matchedState) throw new Error("Could not allocate a unique game code");
+
+      await client.query(
+        `INSERT INTO active_player_games (player_id, game_id, slot)
+         VALUES ($1, $3, 1), ($2, $3, 2)`,
+        [queuedPlayer.id, actor.id, matchedState.gameId]
+      );
+      await client.query("DELETE FROM matchmaking_queue WHERE player_id = $1", [queuedPlayer.id]);
+      await notifyUpdate(client, matchedState);
+      await notifyPlayerUpdate(client, queuedPlayer.id);
+      await notifyPlayerUpdate(client, actor.id);
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        value: { state: "PLAYING", gameCode: matchedState.gameCode, gameStatus: matchedState.status }
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      const constraint = error as ConstraintError;
+      if (constraint.code === "23505" && constraint.constraint === "active_player_games_pkey") {
+        return failed(domainError("PLAYER_ALREADY_PLAYING"));
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async cancelMatchmaking(playerId: string): Promise<PlayerStateResponse> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await lockMatchmaking(client);
+      await lockPlayer(client, playerId);
+      const removed = await client.query("DELETE FROM matchmaking_queue WHERE player_id = $1", [playerId]);
+      const state = removed.rowCount === 0 ? await playerState(client, playerId) : { state: "NOT_PLAYING" as const };
+      await notifyPlayerUpdate(client, playerId);
+      await client.query("COMMIT");
+      return state;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async touchPresence(gameId: string, playerId: string): Promise<void> {

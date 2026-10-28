@@ -6,6 +6,7 @@ const messages: Record<GameErrorCode, string> = {
   INVALID_GAME_CODE: "The game code is invalid.",
   GAME_NOT_FOUND: "The game was not found.",
   PLAYER_ALREADY_PLAYING: "The player is already in an unfinished game.",
+  PLAYER_ALREADY_SEARCHING: "The player is already searching for a public match.",
   PLAYER_ALREADY_IN_GAME: "The player is already in this game.",
   PLAYER_NOT_IN_GAME: "The player is not a participant in this game.",
   GAME_FULL: "The game already has two players.",
