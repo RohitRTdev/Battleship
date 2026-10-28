@@ -120,6 +120,133 @@ def coordinate_name(coordinate: dict[str, int]) -> str:
     return f"{chr(ord('A') + coordinate['column'])}{coordinate['row'] + 1}"
 
 
+def orthogonal_neighbours(cell: tuple[int, int]) -> list[tuple[int, int]]:
+    row, column = cell
+    return [
+        (candidate_row, candidate_column)
+        for candidate_row, candidate_column in (
+            (row - 1, column),
+            (row + 1, column),
+            (row, column - 1),
+            (row, column + 1),
+        )
+        if 0 <= candidate_row < BOARD_SIZE and 0 <= candidate_column < BOARD_SIZE
+    ]
+
+
+def connected_components(cells: set[tuple[int, int]]) -> list[set[tuple[int, int]]]:
+    remaining = set(cells)
+    components: list[set[tuple[int, int]]] = []
+    while remaining:
+        component: set[tuple[int, int]] = set()
+        pending = [remaining.pop()]
+        while pending:
+            cell = pending.pop()
+            component.add(cell)
+            for neighbour in orthogonal_neighbours(cell):
+                if neighbour in remaining:
+                    remaining.remove(neighbour)
+                    pending.append(neighbour)
+        components.append(component)
+    return components
+
+
+def aggressive_target(game: dict[str, Any], rng: random.Random) -> dict[str, int]:
+    """Choose a shot using hit pursuit and a remaining-ship probability map."""
+
+    attacks = {
+        (attack["coordinate"]["row"], attack["coordinate"]["column"]): attack["result"]
+        for attack in game.get("yourAttacks", [])
+    }
+    available = {
+        (row, column)
+        for row in range(BOARD_SIZE)
+        for column in range(BOARD_SIZE)
+        if (row, column) not in attacks
+    }
+    if not available:
+        raise ApiError("The bot ran out of legal target squares")
+
+    hit_cells = {cell for cell, result in attacks.items() if result != "MISS"}
+    hit_groups = connected_components(hit_cells)
+    sunk_groups = [
+        group
+        for group in hit_groups
+        if any(attacks[cell] in {"SUNK", "WIN"} for cell in group)
+    ]
+    unresolved_groups = [group for group in hit_groups if group not in sunk_groups]
+
+    # Ships may not touch, so every square surrounding an already sunk ship is
+    # known to be empty even if it has never been fired at.
+    impossible = {
+        (row, column)
+        for group in sunk_groups
+        for ship_row, ship_column in group
+        for row in range(max(0, ship_row - 1), min(BOARD_SIZE, ship_row + 2))
+        for column in range(max(0, ship_column - 1), min(BOARD_SIZE, ship_column + 2))
+    }
+    useful_available = available - impossible
+    if not useful_available:
+        useful_available = available
+
+    remaining_lengths = list(SHIP_LENGTHS)
+    for group in sunk_groups:
+        if len(group) in remaining_lengths:
+            remaining_lengths.remove(len(group))
+
+    scores = {cell: 0 for cell in useful_available}
+    misses = {cell for cell, result in attacks.items() if result == "MISS"}
+    forbidden = misses | impossible
+
+    # Count every placement still compatible with what the bot has learned.
+    # Cells occurring in more possible placements receive a higher score.
+    for length in remaining_lengths:
+        for horizontal in (True, False):
+            row_limit = BOARD_SIZE if horizontal else BOARD_SIZE - length + 1
+            column_limit = BOARD_SIZE - length + 1 if horizontal else BOARD_SIZE
+            for row in range(row_limit):
+                for column in range(column_limit):
+                    placement = {
+                        (row, column + offset) if horizontal else (row + offset, column)
+                        for offset in range(length)
+                    }
+                    if placement & forbidden:
+                        continue
+                    for cell in placement & useful_available:
+                        scores[cell] += 1
+                    matching_hit_groups = sum(
+                        group <= placement for group in unresolved_groups
+                    )
+                    if matching_hit_groups:
+                        for cell in placement & useful_available:
+                            scores[cell] += 40 * matching_hit_groups
+
+    # After a hit, restrict the next shot to that ship's neighbours. With two
+    # aligned hits, only consider the two ends of the discovered line.
+    pursuit: set[tuple[int, int]] = set()
+    for group in unresolved_groups:
+        rows = {row for row, _ in group}
+        columns = {column for _, column in group}
+        if len(group) > 1 and len(rows) == 1:
+            row = next(iter(rows))
+            ordered = sorted(column for _, column in group)
+            pursuit.update({(row, ordered[0] - 1), (row, ordered[-1] + 1)})
+        elif len(group) > 1 and len(columns) == 1:
+            column = next(iter(columns))
+            ordered = sorted(row for row, _ in group)
+            pursuit.update({(ordered[0] - 1, column), (ordered[-1] + 1, column)})
+        else:
+            for cell in group:
+                pursuit.update(orthogonal_neighbours(cell))
+    pursuit &= useful_available
+
+    candidates = pursuit or useful_available
+    best_score = max(scores.get(cell, 0) for cell in candidates)
+    best = sorted(cell for cell in candidates if scores.get(cell, 0) == best_score)
+    row, column = rng.choice(best)
+    return {"row": row, "column": column}
+
+
 def bot_player(game: dict[str, Any]) -> dict[str, Any]:
     player_id = game.get("yourPlayerId")
     for player in game.get("players", []):
@@ -161,7 +288,7 @@ def finish_abandoned_game(client: GameClient, game: dict[str, Any]) -> None:
         pass
 
 
-def run_bot(client: GameClient, rng: random.Random) -> None:
+def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) -> None:
     created = client.request("POST", "/api/backend/games", {}, expected=(201,))
     game = created["game"]
     code = game["gameCode"]
@@ -211,16 +338,18 @@ def run_bot(client: GameClient, rng: random.Random) -> None:
                 game = wait_for_update(client, game)
                 continue
 
-            previously_attacked = {
-                (attack["coordinate"]["row"], attack["coordinate"]["column"])
-                for attack in game.get("yourAttacks", [])
-            }
-            while targets and (targets[-1]["row"], targets[-1]["column"]) in previously_attacked:
-                targets.pop()
-            if not targets:
-                raise ApiError("The bot ran out of legal target squares")
-
-            target = targets.pop()
+            if aggressive:
+                target = aggressive_target(game, rng)
+            else:
+                previously_attacked = {
+                    (attack["coordinate"]["row"], attack["coordinate"]["column"])
+                    for attack in game.get("yourAttacks", [])
+                }
+                while targets and (targets[-1]["row"], targets[-1]["column"]) in previously_attacked:
+                    targets.pop()
+                if not targets:
+                    raise ApiError("The bot ran out of legal target squares")
+                target = targets.pop()
             try:
                 response = client.request(
                     "POST",
@@ -259,6 +388,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, help="Use repeatable ship and shot randomness")
     parser.add_argument(
+        "--aggressive",
+        action="store_true",
+        help="Use intelligent ship hunting and probability-based targeting",
+    )
+    parser.add_argument(
         "--names-file",
         type=Path,
         default=DEFAULT_NAME_FILE,
@@ -285,7 +419,7 @@ def main() -> int:
         register(args.base_url, username, password)
         token = login(args.base_url, username, password).access_token
         print(f"Playing as {username}.", flush=True)
-        run_bot(GameClient(args.base_url, token), rng)
+        run_bot(GameClient(args.base_url, token), rng, aggressive=args.aggressive)
         return 0
     except (ApiError, AuthClientError) as error:
         print(f"Bot stopped: {error}", file=sys.stderr)

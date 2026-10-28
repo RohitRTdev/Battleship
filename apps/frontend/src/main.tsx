@@ -1,5 +1,5 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, ReactNode } from "react";
+import type { CSSProperties, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation, useMatch, useNavigate } from "react-router-dom";
 import type { AttackView, ConnectionStatus, Coordinate, PlayerGameView, PlayerSummary } from "@battleship/game-contract";
@@ -18,9 +18,51 @@ type NetworkState = "connected" | "reconnecting" | "offline";
 
 let auth: AuthProvider;
 let api: ReturnType<typeof createApi>;
+let gameAudioContext: AudioContext | null = null;
 
 function coordinateKey({ row, column }: Coordinate): string { return `${row}:${column}`; }
 function delay(milliseconds: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)); }
+
+type GameSound = "hit" | "miss" | "sunk" | "win" | "loss";
+
+function audioContext(): AudioContext | null {
+  if (typeof AudioContext === "undefined") return null;
+  gameAudioContext ??= new AudioContext();
+  return gameAudioContext;
+}
+
+function unlockGameAudio(): void {
+  const context = audioContext();
+  if (context?.state === "suspended") void context.resume();
+}
+
+function playGameSound(sound: GameSound): void {
+  const context = audioContext();
+  if (!context || context.state !== "running") return;
+  const now = context.currentTime;
+  const master = context.createGain();
+  master.gain.setValueAtTime(.0001, now);
+  master.gain.exponentialRampToValueAtTime(.16, now + .012);
+  master.connect(context.destination);
+  const tone = (frequency: number, start: number, duration: number, type: OscillatorType = "sine", volume = 1) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(frequency, now + start);
+    gain.gain.setValueAtTime(.0001, now + start);
+    gain.gain.exponentialRampToValueAtTime(volume, now + start + .01);
+    gain.gain.exponentialRampToValueAtTime(.0001, now + start + duration);
+    oscillator.connect(gain).connect(master);
+    oscillator.start(now + start);
+    oscillator.stop(now + start + duration + .02);
+  };
+  if (sound === "miss") { tone(190, 0, .15, "sine", .45); tone(120, .08, .22, "sine", .25); }
+  if (sound === "hit") { tone(110, 0, .18, "sawtooth", .8); tone(72, .035, .25, "square", .35); }
+  if (sound === "sunk") { tone(180, 0, .42, "sawtooth", .8); tone(120, .1, .5, "square", .45); tone(62, .2, .62, "sine", .9); }
+  if (sound === "win") { [392, 523, 659, 784].forEach((frequency, index) => tone(frequency, index * .12, .42, "triangle", .7)); tone(1047, .5, .8, "sine", .7); }
+  if (sound === "loss") { [330, 277, 220, 165].forEach((frequency, index) => tone(frequency, index * .18, .38, "triangle", .55)); }
+  master.gain.exponentialRampToValueAtTime(.0001, now + (sound === "win" || sound === "loss" ? 1.25 : .9));
+}
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return <div className={`brand ${compact ? "brand--compact" : ""}`}>Battleship</div>;
@@ -101,8 +143,8 @@ function Presence({ status }: { status: ConnectionStatus }) {
   return <span className={`presence presence--${status.toLowerCase()}`}><i />{label}</span>;
 }
 
-function PlayerCard({ player, isYou, active }: { player?: PlayerSummary; isYou?: boolean; active?: boolean }) {
-  return <div className={`player-card ${active ? "player-card--active" : ""} ${!player ? "player-card--empty" : ""}`}><div className="avatar">{player ? player.username.slice(0, 1).toUpperCase() : "?"}</div><div><strong>{player?.username ?? "Waiting for player"}{isYou && <small> YOU</small>}</strong>{player ? <Presence status={player.connectionStatus} /> : <span className="muted small">Share the game code</span>}</div>{active && <span className="turn-tag">TURN</span>}</div>;
+function PlayerCard({ player, isYou, active, gameComplete = false }: { player?: PlayerSummary; isYou?: boolean; active?: boolean; gameComplete?: boolean }) {
+  return <div className={`player-card ${active ? "player-card--active" : ""} ${!player ? "player-card--empty" : ""}`}><div className="avatar">{player ? player.username.slice(0, 1).toUpperCase() : "?"}</div><div><strong>{player?.username ?? "Waiting for player"}{isYou && <small> YOU</small>}</strong>{player ? gameComplete ? <span className="muted small">Game complete</span> : <Presence status={player.connectionStatus} /> : <span className="muted small">Share the game code</span>}</div>{active && <span className="turn-tag">TURN</span>}</div>;
 }
 
 function GameCode({ code }: { code: string }) {
@@ -155,19 +197,67 @@ function BattleBoard({ label, own, game, disabled, pendingShot, onFire }: { labe
   </div></div></div>;
 }
 
-function FleetCounter({ title, sunk }: { title: string; sunk: number }) { return <div className="fleet-counter"><div><span>{title}</span><strong>{sunk}<small>/5 SUNK</small></strong></div><div className="mini-fleet" aria-hidden="true">{FLEET.map((ship, index) => <span key={ship.id} className={index < sunk ? "sunk" : ""} style={{ width: `${ship.length * 5 + 8}px` }} />)}</div></div>; }
+function FleetCounter({ title, sunkLengths }: { title: string; sunkLengths: number[] }) {
+  const unmatched = [...sunkLengths];
+  const ships = FLEET.map((ship) => {
+    const sunkIndex = unmatched.indexOf(ship.length);
+    if (sunkIndex >= 0) unmatched.splice(sunkIndex, 1);
+    return { ...ship, sunk: sunkIndex >= 0 };
+  });
+  return <div className="fleet-counter"><div className="fleet-counter__label"><span>{title}</span><strong>{sunkLengths.length}<small>/5 SUNK</small></strong></div><div className="fleet-icons">{ships.map((ship) => <div key={ship.id} className={`fleet-icon ${ship.sunk ? "fleet-icon--sunk" : ""}`} aria-label={`${ship.name}: ${ship.sunk ? "sunk" : "afloat"}`} title={`${ship.name} · ${ship.sunk ? "Sunk" : "Afloat"}`}><span className="fleet-icon__ship"><i />{Array.from({ length: ship.length }, (_, index) => <b key={index} />)}</span><em>{ship.sunk ? "×" : "✓"}</em></div>)}</div></div>;
+}
+
+function SinkCelebration({ count, lost }: { count: number; lost: boolean }) {
+  return <div className={`sink-celebration ${lost ? "sink-celebration--lost" : ""}`} role="status" aria-live="assertive"><div className="sink-burst" aria-hidden="true">{Array.from({ length: 18 }, (_, index) => <i key={index} style={{ "--spark": index } as CSSProperties} />)}</div><div className="sink-medal"><span className="sink-medal__ship">▰</span><small>{lost ? "ENEMY STRIKE" : "DIRECT HIT"}</small><strong>{lost ? "SHIP LOST!" : "SHIP SUNK!"}</strong><b>{lost ? `FLEET DAMAGE ×${count}` : `FLEET STREAK ×${count}`}</b></div></div>;
+}
+
+function GameResultCelebration({ won }: { won: boolean }) {
+  return <div className={`result-celebration ${won ? "result-celebration--win" : "result-celebration--loss"}`} aria-hidden="true">{won && <div className="confetti">{Array.from({ length: 32 }, (_, index) => <i key={index} style={{ "--piece": index } as CSSProperties} />)}</div>}<div className="result-emblem"><span>{won ? "★" : "⌁"}</span><strong>{won ? "VICTORY" : "DEFEAT"}</strong></div></div>;
+}
 
 function Battle({ game, network, busy, error, pendingShot, onFire, onSurrender, onLobby }: { game: PlayerGameView; network: NetworkState; busy: boolean; error: string; pendingShot: Coordinate | null; onFire: (row: number, column: number) => void; onSurrender: () => void; onLobby: () => void }) {
+  const previous = useRef({ yourAttacks: game.yourAttacks.length, opponentAttacks: game.opponentAttacks.length, finished: game.status === "FINISHED" });
+  const sinkTimer = useRef<number | null>(null);
+  const [sinkCelebration, setSinkCelebration] = useState<{ count: number; lost: boolean } | null>(null);
   const you = game.players.find((player) => player.id === game.yourPlayerId)!;
   const opponent = game.players.find((player) => player.id !== game.yourPlayerId);
-  const ownSunk = game.yourFleet?.filter((ship) => ship.sunk).length ?? 0;
-  const enemySunk = game.yourAttacks.filter((attack) => attack.result === "SUNK" || attack.result === "WIN").length;
+  const ownSunkLengths = game.yourFleet?.filter((ship) => ship.sunk).map((ship) => ship.length) ?? [];
+  const enemySunkLengths = game.yourAttacks.filter((attack) => attack.result === "SUNK" || attack.result === "WIN").map((attack, index) => attack.sunkShipLength ?? FLEET[index]?.length ?? 2);
   const finished = game.status === "FINISHED"; const won = game.winnerPlayerId === game.yourPlayerId; const cancelled = game.completionReason === "CANCELLED";
+
+  useEffect(() => {
+    const last = previous.current;
+    const latestYourAttack = game.yourAttacks.length > last.yourAttacks ? game.yourAttacks.at(-1) : undefined;
+    const latestOpponentAttack = game.opponentAttacks.length > last.opponentAttacks ? game.opponentAttacks.at(-1) : undefined;
+    const newFinish = game.status === "FINISHED" && !last.finished && !cancelled;
+    previous.current = { yourAttacks: game.yourAttacks.length, opponentAttacks: game.opponentAttacks.length, finished: game.status === "FINISHED" };
+    if (newFinish) playGameSound(won ? "win" : "loss");
+    else {
+      const result = latestYourAttack?.result ?? latestOpponentAttack?.result;
+      if (result === "MISS") playGameSound("miss");
+      if (result === "HIT") playGameSound("hit");
+      if (result === "SUNK" || result === "WIN") playGameSound("sunk");
+    }
+    const sankOpponent = latestYourAttack?.result === "SUNK" || latestYourAttack?.result === "WIN";
+    const lostShip = latestOpponentAttack?.result === "SUNK" || latestOpponentAttack?.result === "WIN";
+    if (newFinish) {
+      if (sinkTimer.current !== null) window.clearTimeout(sinkTimer.current);
+      sinkTimer.current = null;
+      setSinkCelebration(null);
+    } else if (sankOpponent || lostShip) {
+      setSinkCelebration({ count: sankOpponent ? enemySunkLengths.length : ownSunkLengths.length, lost: lostShip });
+      if (sinkTimer.current !== null) window.clearTimeout(sinkTimer.current);
+      sinkTimer.current = window.setTimeout(() => { setSinkCelebration(null); sinkTimer.current = null; }, 2100);
+    }
+  }, [game.version, game.status, game.yourAttacks, game.opponentAttacks, won, cancelled, enemySunkLengths.length, ownSunkLengths.length]);
+  useEffect(() => () => { if (sinkTimer.current !== null) window.clearTimeout(sinkTimer.current); }, []);
+
   return <main className={`battle page-enter ${finished ? "battle--finished" : ""}`}><section className={`turn-banner ${game.isYourTurn ? "turn-banner--yours" : ""} ${finished ? won ? "turn-banner--win" : "turn-banner--loss" : ""}`} aria-live="polite"><div><p className="eyebrow">{finished ? "GAME OVER" : "CURRENT TURN"}</p><h1>{finished ? cancelled ? "Game cancelled" : won ? "You won" : "You lost" : game.isYourTurn ? "Your turn" : `${opponent?.username ?? "Opponent"}'s turn`}</h1><p>{finished ? game.completionReason === "SURRENDER" ? (won ? "The other player surrendered." : "You surrendered.") : cancelled ? "The game ended without a winner." : won ? "You sank every enemy ship." : "Your fleet was sunk." : game.isYourTurn ? "Choose a square on the enemy board." : "Waiting for the other player."}</p></div><GameCode code={game.gameCode} /></section>
-    <section className="combatants"><PlayerCard player={you} isYou active={!finished && game.currentTurn === you.id} /><div className="combat-line"><i /><span>VS</span><i /></div><PlayerCard player={opponent} active={!finished && game.currentTurn === opponent?.id} /></section>
+    <section className="combatants"><PlayerCard player={you} isYou active={!finished && game.currentTurn === you.id} gameComplete={finished} /><div className="combat-line"><i /><span>VS</span><i /></div><PlayerCard player={opponent} active={!finished && game.currentTurn === opponent?.id} gameComplete={finished} /></section>
     {opponent?.connectionStatus === "LAGGING" && !finished && <div className="banner banner--lag"><span className="lag-wave">≋</span><div><strong>Opponent connection is slow</strong><small>The game will continue when their connection improves.</small></div></div>}{error && <div className="banner banner--error" role="alert"><span>!</span>{error}</div>}
-    <section className="battle-layout"><div><FleetCounter title="YOUR SHIPS" sunk={ownSunk} /><BattleBoard label="Your board" own game={game} /></div><div><FleetCounter title="OPPONENT SHIPS" sunk={enemySunk} /><BattleBoard label="Opponent board" own={false} game={game} disabled={finished || !game.isYourTurn || network !== "connected" || busy} pendingShot={pendingShot} onFire={onFire} /></div></section>
+    <section className="battle-layout"><div><FleetCounter title="YOUR SHIPS" sunkLengths={ownSunkLengths} /><BattleBoard label="Your board" own game={game} /></div><div><FleetCounter title="OPPONENT SHIPS" sunkLengths={enemySunkLengths} /><BattleBoard label="Opponent board" own={false} game={game} disabled={finished || !game.isYourTurn || network !== "connected" || busy} pendingShot={pendingShot} onFire={onFire} /></div></section>
     <footer className="battle-footer"><div className="legend"><span><i className="legend-miss" />Miss</span><span><i className="legend-hit">×</i>Hit</span><span><i className="legend-ship" />Your ship</span></div>{finished ? <button className="button button--primary" onClick={onLobby}>Back to games</button> : <button className="button button--ghost danger" onClick={onSurrender} disabled={busy}>Surrender</button>}</footer>
+    {sinkCelebration && <SinkCelebration count={sinkCelebration.count} lost={sinkCelebration.lost} />}{finished && !cancelled && <GameResultCelebration won={won} />}
   </main>;
 }
 
@@ -214,6 +304,7 @@ function App() {
   const logout = useCallback((notice = "") => { void auth.logout(); setSession(null); setActiveGameCode(null); setGame(null); setGameLoadError(""); pollGameCode.current = null; pollVersion.current = 0; setBusy(""); setError(""); setAuthNotice(notice); setConnectionBlocked(false); setConfirmingSurrender(false); navigate("/login", { replace: true }); }, [navigate]);
   const handleFailure = useCallback((caught: unknown, fallback: string) => { if (caught instanceof SessionExpiredError || (caught instanceof ApiFailure && caught.status === 401)) { logout("Your session expired. Sign in again to continue."); return; } setError(caught instanceof Error ? caught.message : fallback); }, [logout]);
 
+  useEffect(() => { const unlock = () => unlockGameAudio(); window.addEventListener("pointerdown", unlock, { once: true }); window.addEventListener("keydown", unlock, { once: true }); return () => { window.removeEventListener("pointerdown", unlock); window.removeEventListener("keydown", unlock); }; }, []);
   useEffect(() => { let active = true; void auth.restoreSession().then((restored) => { if (active) setSession(restored); }).finally(() => { if (active) setCheckingSession(false); }); return () => { active = false; }; }, []);
 
   useEffect(() => {
@@ -291,7 +382,7 @@ function App() {
 
   async function runGameAction(name: string, action: () => Promise<{ game: PlayerGameView }>): Promise<PlayerGameView | null> { if (!session || busy) return null; setBusy(name); setError(""); try { const response = await action(); applyGame(response.game); return response.game; } catch (caught) { handleFailure(caught, "That action could not be completed."); return null; } finally { setBusy(""); } }
   async function startGame(name: "create" | "join", action: () => Promise<{ game: PlayerGameView }>) { const next = await runGameAction(name, action); if (next) navigate(gamePath(next.gameCode)); }
-  async function fire(row: number, column: number) { if (!session || !game || busy || !game.isYourTurn || network !== "connected") return; setPendingShot({ row, column }); setBusy("fire"); setError(""); try { const response = await api.fire(game.gameCode, row, column); applyGame(response.game); await delay(360); } catch (caught) { handleFailure(caught, "That square could not be played."); } finally { setPendingShot(null); setBusy(""); } }
+  async function fire(row: number, column: number) { if (!session || !game || busy || !game.isYourTurn || network !== "connected") return; unlockGameAudio(); setPendingShot({ row, column }); setBusy("fire"); setError(""); try { const response = await api.fire(game.gameCode, row, column); applyGame(response.game); await delay(360); } catch (caught) { handleFailure(caught, "That square could not be played."); } finally { setPendingShot(null); setBusy(""); } }
 
   const loading = <LoadingScreen />;
   const checkingIdentity = checkingSession || Boolean(session && checkingPlayerState);
