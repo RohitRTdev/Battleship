@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation, useMatch, useNavigate } from "react-router-dom";
-import type { AttackView, ConnectionStatus, Coordinate, PlayerGameView, PlayerSummary } from "@battleship/game-contract";
+import type { ArchivedMatchDetail, AttackView, ConnectionStatus, Coordinate, PlayerGameView, PlayerProfileResponse, PlayerSummary, ShipView } from "@battleship/game-contract";
 import { ApiFailure, SessionExpiredError, createApi } from "./api";
 import { authenticationErrorMessage, createAuthProvider, type AuthProvider, type UserSession } from "./auth";
 import { BOARD_SIZE, FLEET, autoPlaceFleet, cellsFor, toPlacements, validatePlacement } from "./fleet";
@@ -64,8 +64,11 @@ function playGameSound(sound: GameSound): void {
   master.gain.exponentialRampToValueAtTime(.0001, now + (sound === "win" || sound === "loss" ? 1.25 : .9));
 }
 
-function Brand({ compact = false }: { compact?: boolean }) {
-  return <div className={`brand ${compact ? "brand--compact" : ""}`}>Battleship</div>;
+function Brand({ compact = false, onClick }: { compact?: boolean; onClick?: () => void }) {
+  const className = `brand ${compact ? "brand--compact" : ""}`;
+  return onClick
+    ? <button type="button" className={className} onClick={onClick} aria-label="Back to lobby">Battleship</button>
+    : <div className={className}>Battleship</div>;
 }
 
 function ButtonSpinner() { return <span className="button-spinner" aria-hidden="true" />; }
@@ -122,8 +125,8 @@ function AuthScreen({ initialNotice, onAuthenticated }: { initialNotice: string;
   </main>;
 }
 
-function AppHeader({ username, network, onLogout }: { username: string; network: NetworkState; onLogout: () => void }) {
-  return <header className="app-header"><Brand compact /><div className="header-actions"><span className={`network-pill network-pill--${network}`}><i />{network === "connected" ? "Connected" : network === "offline" ? "Offline" : "Reconnecting"}</span><span className="user-chip"><span>{username.slice(0, 1).toUpperCase()}</span>{username}</span><button className="icon-button" onClick={onLogout} aria-label="Sign out" title="Sign out">↪</button></div></header>;
+function AppHeader({ username, network, onLobby, onProfile, onLogout }: { username: string; network: NetworkState; onLobby: () => void; onProfile: () => void; onLogout: () => void }) {
+  return <header className="app-header"><Brand compact onClick={onLobby} /><div className="header-actions"><span className={`network-pill network-pill--${network}`}><i />{network === "connected" ? "Connected" : network === "offline" ? "Offline" : "Reconnecting"}</span><button className="user-chip" onClick={onProfile} aria-label="Open profile"><span>{username.slice(0, 1).toUpperCase()}</span>{username}</button><button className="icon-button" onClick={onLogout} aria-label="Sign out" title="Sign out">↪</button></div></header>;
 }
 
 function Lobby({ username, network, busy, error, onCreate, onJoin, onPublic }: { username: string; network: NetworkState; busy: string; error: string; onCreate: () => void; onJoin: (code: string) => void; onPublic: () => void }) {
@@ -208,11 +211,12 @@ function FleetPlacement({ game, busy, error, onSubmit, onCancel }: { game: Playe
   </div></main>;
 }
 
-function BattleBoard({ label, own, game, disabled, pendingShot, onFire }: { label: string; own: boolean; game: PlayerGameView; disabled?: boolean; pendingShot?: Coordinate | null; onFire?: (row: number, column: number) => void }) {
+function BattleBoard({ label, own, game, revealedFleet, disabled, pendingShot, onFire }: { label: string; own: boolean; game: PlayerGameView; revealedFleet?: ShipView[]; disabled?: boolean; pendingShot?: Coordinate | null; onFire?: (row: number, column: number) => void }) {
   const attacks: AttackView[] = own ? game.opponentAttacks : game.yourAttacks;
   const attackMap = new Map(attacks.map((attack) => [coordinateKey(attack.coordinate), attack]));
   const shipCells = new Map<string, { hit: boolean; sunk: boolean }>();
-  if (own) game.yourFleet?.forEach((ship) => ship.cells.forEach((cell) => shipCells.set(coordinateKey(cell), { hit: ship.hits.some((hit) => coordinateKey(hit) === coordinateKey(cell)), sunk: ship.sunk })));
+  const visibleFleet = own ? game.yourFleet : revealedFleet;
+  visibleFleet?.forEach((ship) => ship.cells.forEach((cell) => shipCells.set(coordinateKey(cell), { hit: ship.hits.some((hit) => coordinateKey(hit) === coordinateKey(cell)), sunk: ship.sunk })));
   return <div className="battle-board-block"><div className="battle-board-title"><span>{label}</span><small>{own ? "DEFENSE GRID" : "TARGETING GRID"}</small></div><div className="board-wrap"><div className="board-corner" />{COLUMN_LABELS.map((column) => <span className="axis axis--column" key={column}>{column}</span>)}{Array.from({ length: 10 }, (_, row) => <span className="axis axis--row" key={row}>{row + 1}</span>)}<div className={`board battle-board ${own ? "battle-board--own" : "battle-board--target"}`} role="grid" aria-label={label}>
     {Array.from({ length: 100 }, (_, index) => { const row = Math.floor(index / 10); const column = index % 10; const key = `${row}:${column}`; const attack = attackMap.get(key); const ship = shipCells.get(key); const pending = pendingShot?.row === row && pendingShot.column === column; const hit = attack && attack.result !== "MISS"; return <button key={key} role="gridcell" disabled={own || disabled || Boolean(attack)} aria-label={`${COLUMN_LABELS[column]}${row + 1}${attack ? `, ${attack.result.toLowerCase()}` : ship ? ", ship" : ""}`} onClick={() => onFire?.(row, column)} className={`cell ${ship ? "cell--own-ship" : ""} ${ship?.sunk ? "cell--sunk-ship" : ""} ${attack?.result === "MISS" ? "cell--miss" : ""} ${hit ? "cell--hit" : ""} ${pending ? "cell--pending-shot" : ""}`}>{attack?.result === "MISS" && <span className="miss-dot" />}{hit && <span className="hit-mark">×</span>}{pending && <span className="target-lock" />}</button>; })}
   </div></div></div>;
@@ -282,6 +286,100 @@ function Battle({ game, network, busy, error, pendingShot, onFire, onSurrender, 
   </main>;
 }
 
+function ProfileScreen({ onOpenMatch }: { onOpenMatch: (matchId: string) => void }) {
+  const [profile, setProfile] = useState<PlayerProfileResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true); setError("");
+    void api.playerProfile().then((result) => { if (active) setProfile(result); }).catch((caught: unknown) => {
+      if (active) setError(caught instanceof Error ? caught.message : "Your profile could not be loaded.");
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function loadMore() {
+    if (!profile?.nextCursor || loadingMore) return;
+    setLoadingMore(true); setError("");
+    try {
+      const next = await api.playerProfile(profile.nextCursor);
+      setProfile((current) => current ? { ...next, matches: [...current.matches, ...next.matches] } : next);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "More matches could not be loaded.");
+    } finally { setLoadingMore(false); }
+  }
+
+  if (loading) return <LoadingScreen />;
+  if (!profile) return <RouteMessage eyebrow="PROFILE UNAVAILABLE" title="Profile could not be loaded" message={error || "Try again shortly."} actionLabel="Try again" onAction={() => window.location.reload()} />;
+  const statistics = [
+    ["MATCHES", profile.statistics.matchesPlayed],
+    ["WINS", profile.statistics.wins],
+    ["LOSSES", profile.statistics.losses],
+    ["SURRENDERS", profile.statistics.surrenders]
+  ] as const;
+  return <main className="profile page-enter">
+    <section className="profile-hero"><div className="profile-avatar">{profile.player.username.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">COMMANDER PROFILE</p><h1>{profile.player.username}</h1><p>Lifetime battle record</p></div></section>
+    <section className="profile-stats" aria-label="Player statistics">{statistics.map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}</section>
+    <section className="profile-history-panel"><div className="profile-history-heading"><div><p className="eyebrow">MATCH HISTORY</p><h2>Final battle states</h2></div><span>{profile.statistics.matchesPlayed} PLAYED</span></div>
+      {error && <div className="banner banner--error" role="alert"><span>!</span>{error}</div>}
+      {profile.matches.length === 0 ? <div className="profile-empty"><strong>No completed matches yet</strong><p>Fleet-destroyed and surrendered games will appear here.</p></div> :
+        <div className="profile-history" onScroll={(event) => { const element = event.currentTarget; if (element.scrollHeight - element.scrollTop - element.clientHeight < 100) void loadMore(); }}>
+          {profile.matches.map((match) => {
+            const opponent = match.players.find((player) => player.id !== profile.player.id);
+            return <button className="match-row" key={match.matchId} onClick={() => onOpenMatch(match.matchId)}><span className={`match-result match-result--${match.outcome.toLowerCase()}`}>{match.outcome}</span><span className="match-opponent"><small>VS</small><strong>{opponent?.username ?? "Unknown player"}</strong></span><span className="match-reason">{match.completionReason === "SURRENDER" ? match.surrendered ? "You surrendered" : "Opponent surrendered" : "Fleet destroyed"}</span><time dateTime={match.endedAt}>{new Date(match.endedAt).toLocaleString()}</time><b aria-hidden="true">›</b></button>;
+          })}
+          {loadingMore && <div className="profile-more"><ButtonSpinner /> Loading more…</div>}
+          {!profile.nextCursor && profile.matches.length > 0 && <div className="profile-end">END OF HISTORY</div>}
+        </div>}
+    </section>
+  </main>;
+}
+
+function ArchivedBattle({ match, onBack }: { match: ArchivedMatchDetail; onBack: () => void }) {
+  const you = match.players.find((player) => player.id === match.viewerPlayerId)!;
+  const opponent = match.players.find((player) => player.id !== match.viewerPlayerId)!;
+  const ownFleet = match.fleets.find((fleet) => fleet.playerId === you.id)?.ships ?? [];
+  const opponentFleet = match.fleets.find((fleet) => fleet.playerId === opponent.id)?.ships ?? [];
+  const yourAttacks = match.attacks.filter((attack) => attack.attackerPlayerId === you.id).map(({ attackerPlayerId: _attacker, ...attack }) => attack);
+  const opponentAttacks = match.attacks.filter((attack) => attack.attackerPlayerId === opponent.id).map(({ attackerPlayerId: _attacker, ...attack }) => attack);
+  const game: PlayerGameView = {
+    gameCode: match.gameCode, status: "FINISHED", version: 1, createdAt: match.startedAt,
+    startedAt: match.startedAt, endedAt: match.endedAt,
+    players: match.players.map((player) => ({ ...player, fleetSubmitted: true, connectionStatus: "UNKNOWN" })),
+    yourPlayerId: you.id, currentTurn: null, isYourTurn: false, yourFleet: ownFleet,
+    yourAttacks, opponentAttacks, winnerPlayerId: match.winnerPlayerId, completionReason: match.completionReason
+  };
+  const won = match.outcome === "WIN";
+  const ownSunk = ownFleet.filter((ship) => ship.sunk).map((ship) => ship.length);
+  const opponentSunk = opponentFleet.filter((ship) => ship.sunk).map((ship) => ship.length);
+  const playerSummary = (player: typeof you): PlayerSummary => ({ ...player, fleetSubmitted: true, connectionStatus: "UNKNOWN" });
+  return <main className="battle battle--finished page-enter archived-battle"><section className={`turn-banner ${won ? "turn-banner--win" : "turn-banner--loss"}`}><div><p className="eyebrow">ARCHIVED MATCH</p><h1>{won ? "You won" : "You lost"}</h1><p>{match.completionReason === "SURRENDER" ? match.surrendered ? "You surrendered." : "The other player surrendered." : won ? "You sank every enemy ship." : "Your fleet was sunk."}</p></div><GameCode code={match.gameCode} /></section>
+    <section className="combatants"><PlayerCard player={playerSummary(you)} isYou gameComplete /><div className="combat-line"><i /><span>VS</span><i /></div><PlayerCard player={playerSummary(opponent)} gameComplete /></section>
+    <section className="battle-layout"><div><FleetCounter title="YOUR SHIPS" sunkLengths={ownSunk} /><BattleBoard label="Your final board" own game={game} disabled /></div><div><FleetCounter title="OPPONENT SHIPS" sunkLengths={opponentSunk} /><BattleBoard label="Opponent final board" own={false} game={game} revealedFleet={opponentFleet} disabled /></div></section>
+    <footer className="battle-footer"><div className="legend"><span><i className="legend-miss" />Miss</span><span><i className="legend-hit">×</i>Hit</span><span><i className="legend-ship" />Ship placement</span></div><button className="button button--primary" onClick={onBack}>Back to profile</button></footer>
+    <GameResultCelebration won={won} />
+  </main>;
+}
+
+function ArchivedMatchScreen({ matchId, onBack }: { matchId: string; onBack: () => void }) {
+  const [match, setMatch] = useState<ArchivedMatchDetail | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    setMatch(null); setError("");
+    void api.archivedMatch(matchId, controller.signal).then((response) => setMatch(response.match)).catch((caught: unknown) => {
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) setError(caught instanceof Error ? caught.message : "The archived match could not be loaded.");
+    });
+    return () => controller.abort();
+  }, [matchId]);
+  if (error) return <RouteMessage eyebrow="MATCH UNAVAILABLE" title="Archived match could not be opened" message={error} actionLabel="Back to profile" onAction={onBack} />;
+  if (!match) return <LoadingScreen />;
+  return <ArchivedBattle match={match} onBack={onBack} />;
+}
+
 function ConnectionOverlay({ state, onRetry, onLogout, searching = false }: { state: Exclude<NetworkState, "connected">; onRetry: () => void; onLogout: () => void; searching?: boolean }) { return <div className="connection-overlay" role="alertdialog" aria-modal="true" aria-labelledby="connection-title"><div className="connection-card"><div className="connection-icon" aria-hidden="true">!</div><h2 id="connection-title">{state === "offline" ? "You’re offline" : "Connection lost"}</h2><p>{state === "offline" ? `Check your internet connection. Your ${searching ? "search" : "game"} will resume automatically when you’re back online.` : `The server is not responding. Your ${searching ? "place in the queue" : "game"} is saved while we reconnect.`}</p><div className="button-row"><button className="button button--primary" onClick={onRetry}>Retry</button><button className="button button--ghost" onClick={onLogout}>Sign out</button></div></div></div>; }
 
 function ConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) { function keyDown(event: KeyboardEvent<HTMLDivElement>) { if (event.key === "Escape") onCancel(); } return <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onKeyDown={keyDown}><div className="dialog-icon">!</div><h2 id="confirm-title">Surrender the game?</h2><p>The other player will win. This cannot be undone.</p><div className="button-row"><button className="button button--ghost" autoFocus onClick={onCancel}>Keep playing</button><button className="button button--danger" onClick={onConfirm}>Surrender</button></div></div></div>; }
@@ -297,6 +395,7 @@ function App() {
   const location = useLocation();
   const gameRoute = useMatch("/games/:gameCode");
   const matchmakingRoute = useMatch(matchmakingPath);
+  const archivedMatchRoute = useMatch("/profile/matches/:matchId");
   const routedGameCode = gameRoute?.params.gameCode?.trim().toUpperCase() ?? null;
   const [session, setSession] = useState<Session | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
@@ -483,12 +582,15 @@ function App() {
     else if (game.status === "PLACEMENT") gameContent = <FleetPlacement game={game} busy={Boolean(busy)} error={error} onSubmit={(ships) => void runGameAction("fleet", () => api.placeFleet(game.gameCode, toPlacements(ships)))} onCancel={() => void runGameAction("cancel", () => api.cancel(game.gameCode))} />;
     else gameContent = <Battle game={game} network={network} busy={Boolean(busy)} error={error} pendingShot={pendingShot} onFire={fire} onSurrender={() => setConfirmingSurrender(true)} onLobby={() => { setError(""); navigate("/lobby"); }} />;
   }
-  const frame = (content: ReactNode, overlays: "none" | "game" | "matchmaking" = "none") => session ? <div className="app-frame"><AppHeader username={session.username} network={network} onLogout={() => logout()} />{content}{overlays !== "none" && connectionBlocked && network !== "connected" && (overlays === "matchmaking" || game?.gameCode === routedGameCode) && <ConnectionOverlay state={network} searching={overlays === "matchmaking"} onRetry={() => { setNetwork(navigator.onLine ? "reconnecting" : "offline"); setRetryNonce((value) => value + 1); }} onLogout={() => logout()} />}{overlays === "game" && confirmingSurrender && game?.gameCode === routedGameCode && <ConfirmDialog onCancel={() => setConfirmingSurrender(false)} onConfirm={() => { setConfirmingSurrender(false); void runGameAction("surrender", () => api.surrender(game.gameCode)); }} />}</div> : loading;
+  const frame = (content: ReactNode, overlays: "none" | "game" | "matchmaking" = "none") => session ? <div className="app-frame"><AppHeader username={session.username} network={network} onLobby={() => navigate("/lobby")} onProfile={() => navigate("/profile")} onLogout={() => logout()} />{content}{overlays !== "none" && connectionBlocked && network !== "connected" && (overlays === "matchmaking" || game?.gameCode === routedGameCode) && <ConnectionOverlay state={network} searching={overlays === "matchmaking"} onRetry={() => { setNetwork(navigator.onLine ? "reconnecting" : "offline"); setRetryNonce((value) => value + 1); }} onLogout={() => logout()} />}{overlays === "game" && confirmingSurrender && game?.gameCode === routedGameCode && <ConfirmDialog onCancel={() => setConfirmingSurrender(false)} onConfirm={() => { setConfirmingSurrender(false); void runGameAction("surrender", () => api.surrender(game.gameCode)); }} />}</div> : loading;
+  const profileGate = (content: ReactNode) => <LobbyGate activeGameCode={activeGameCode} searching={searching} checking={checkingPlayerState} loading={loading}>{frame(content)}</LobbyGate>;
 
   return <Routes>
     <Route path="/" element={<HomeRedirect authenticated={Boolean(session)} checking={checkingIdentity} activeGameCode={activeGameCode} searching={searching} loading={loading} />} />
     <Route path="/login" element={<LoginGate authenticated={Boolean(session)} checking={checkingIdentity} activeGameCode={activeGameCode} searching={searching} loading={loading}><AuthScreen initialNotice={authNotice} onAuthenticated={authenticate} /></LoginGate>} />
     <Route path="/lobby" element={<RequireSession authenticated={Boolean(session)} checking={checkingSession} loading={loading}>{frame(lobby)}</RequireSession>} />
+    <Route path="/profile" element={<RequireSession authenticated={Boolean(session)} checking={checkingSession} loading={loading}>{profileGate(<ProfileScreen onOpenMatch={(matchId) => navigate(`/profile/matches/${matchId}`)} />)}</RequireSession>} />
+    <Route path="/profile/matches/:matchId" element={<RequireSession authenticated={Boolean(session)} checking={checkingSession} loading={loading}>{profileGate(<ArchivedMatchScreen matchId={archivedMatchRoute?.params.matchId ?? ""} onBack={() => navigate("/profile")} />)}</RequireSession>} />
     <Route path={matchmakingPath} element={<RequireSession authenticated={Boolean(session)} checking={checkingSession} loading={loading}>{frame(matchmaking, "matchmaking")}</RequireSession>} />
     <Route path="/games/:gameCode" element={<RequireSession authenticated={Boolean(session)} checking={checkingSession} loading={loading}><GameGate activeGameCode={activeGameCode} searching={searching} checking={checkingPlayerState} loading={loading} routedGameCode={routedGameCode}>{frame(gameContent, "game")}</GameGate></RequireSession>} />
     <Route path="*" element={<RequireSession authenticated={Boolean(session)} checking={checkingSession} loading={loading}>{frame(<RouteMessage eyebrow="404" title="Page not found" message="That page does not exist." actionLabel="Back to lobby" onAction={() => navigate("/lobby")} />)}</RequireSession>} />

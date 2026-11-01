@@ -1,4 +1,4 @@
-import type { FireResponse, GameResponse, MatchmakingUpdateResponse, PlayerStateResponse, ShipPlacement, UpdateResponse } from "@battleship/game-contract";
+import type { ArchivedMatchResponse, FireResponse, GameResponse, MatchmakingUpdateResponse, PlayerProfileResponse, PlayerStateResponse, ShipPlacement, UpdateResponse } from "@battleship/game-contract";
 import type { AuthProvider } from "./auth";
 
 export class ApiFailure extends Error {
@@ -16,12 +16,19 @@ export class SessionExpiredError extends Error {
 }
 
 type RequestOptions = { method?: string; body?: unknown; signal?: AbortSignal };
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export function createApi(auth: AuthProvider) {
   async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = () => controller.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
+    const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, REQUEST_TIMEOUT_MS);
     const send = async (token: string) => fetch(path, {
       method: options.method ?? "GET",
-      signal: options.signal,
+      signal: controller.signal,
       cache: "no-store",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -30,24 +37,34 @@ export function createApi(auth: AuthProvider) {
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
     });
 
-    let response = await send(await auth.getAccessToken());
-    if (response.status === 401) {
-      const refreshedToken = await auth.refreshSession();
-      if (!refreshedToken) throw new SessionExpiredError();
-      response = await send(refreshedToken);
-    }
+    try {
+      let response = await send(await auth.getAccessToken());
+      if (response.status === 401) {
+        const refreshedToken = await auth.refreshSession();
+        if (!refreshedToken) throw new SessionExpiredError();
+        response = await send(refreshedToken);
+      }
 
-    const payload = await response.json().catch(() => ({})) as { error?: string | { code?: string; message?: string } };
-    if (!response.ok) {
-      const structured = typeof payload.error === "object" ? payload.error : undefined;
-      const message = structured?.message ?? (typeof payload.error === "string" ? payload.error : "Request failed");
-      throw new ApiFailure(message, response.status, structured?.code);
+      const payload = await response.json().catch(() => ({})) as { error?: string | { code?: string; message?: string } };
+      if (!response.ok) {
+        const structured = typeof payload.error === "object" ? payload.error : undefined;
+        const message = structured?.message ?? (typeof payload.error === "string" ? payload.error : "Request failed");
+        throw new ApiFailure(message, response.status, structured?.code);
+      }
+      return payload as T;
+    } catch (error) {
+      if (timedOut) throw new Error("Request timed out. Please try again.");
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
     }
-    return payload as T;
   }
 
   return {
     playerState: () => request<PlayerStateResponse>("/api/backend/player/state"),
+    playerProfile: (cursor?: string, limit = 20) => request<PlayerProfileResponse>(`/api/backend/player/profile?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+    archivedMatch: (matchId: string, signal?: AbortSignal) => request<ArchivedMatchResponse>(`/api/backend/player/matches/${encodeURIComponent(matchId)}`, { signal }),
     startMatchmaking: () => request<PlayerStateResponse>("/api/backend/matchmaking", { method: "POST", body: {} }),
     cancelMatchmaking: () => request<PlayerStateResponse>("/api/backend/matchmaking", { method: "DELETE" }),
     matchmakingUpdates: (signal: AbortSignal) => request<MatchmakingUpdateResponse>("/api/backend/matchmaking/updates", { signal }),

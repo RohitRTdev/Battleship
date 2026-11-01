@@ -63,6 +63,21 @@ const migrations = [
         enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
       );
     `
+  },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE match_archive_jobs (
+        game_id UUID PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+        snapshot JSONB NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        available_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        last_error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+      );
+
+      CREATE INDEX match_archive_jobs_available_idx ON match_archive_jobs (available_at, created_at);
+    `
   }
 ] as const;
 

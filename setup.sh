@@ -66,7 +66,7 @@ up_dev() {
   setup_env
   echo "Installing dependencies..."
   npm install
-  npm run build --workspace=@battleship/protocol
+  npm run build
   docker compose up --build --detach --wait
   echo "Development environment: http://localhost:${GATEWAY_PORT:-8000}"
 }

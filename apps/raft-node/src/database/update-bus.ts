@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 
 type UpdatePayload = { gameId: string; version: number };
 type PlayerUpdatePayload = { playerId: string };
+type ArchiveUpdatePayload = { gameId: string };
 
 export class GameUpdateBus {
   private readonly events = new EventEmitter();
@@ -33,6 +34,9 @@ export class GameUpdateBus {
         } else if (message.channel === "player_state_updates") {
           const payload = JSON.parse(message.payload) as PlayerUpdatePayload;
           if (typeof payload.playerId === "string") this.events.emit(`player:${payload.playerId}`);
+        } else if (message.channel === "match_archive_jobs") {
+          const payload = JSON.parse(message.payload) as ArchiveUpdatePayload;
+          if (typeof payload.gameId === "string") this.events.emit("archive", payload.gameId);
         }
       } catch {
         console.error(`Ignored malformed ${message.channel} notification`);
@@ -47,6 +51,8 @@ export class GameUpdateBus {
     try {
       await listener.query("LISTEN game_updates");
       await listener.query("LISTEN player_state_updates");
+      await listener.query("LISTEN match_archive_jobs");
+      this.events.emit("archive");
     } catch (error) {
       if (this.listener === listener) this.listener = null;
       listener.release(true);
@@ -79,6 +85,14 @@ export class GameUpdateBus {
 
   offPlayer(playerId: string, listener: () => void): void {
     this.events.off(`player:${playerId}`, listener);
+  }
+
+  onArchive(listener: (gameId?: string) => void): void {
+    this.events.on("archive", listener);
+  }
+
+  offArchive(listener: (gameId?: string) => void): void {
+    this.events.off("archive", listener);
   }
 
   close(): void {

@@ -14,6 +14,27 @@ locals {
   tags = { Project = var.name, ManagedBy = "terraform" }
 }
 
+resource "aws_s3_bucket" "match_archive" {
+  bucket        = "${var.name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-matches"
+  force_destroy = true
+  tags          = local.tags
+}
+
+resource "aws_s3_bucket_public_access_block" "match_archive" {
+  bucket                  = aws_s3_bucket.match_archive.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "match_archive" {
+  bucket = aws_s3_bucket.match_archive.id
+  rule {
+    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+  }
+}
+
 resource "aws_vpc" "main" {
   cidr_block           = "10.42.0.0/16"
   enable_dns_support   = true
@@ -186,6 +207,16 @@ resource "aws_iam_role" "task" {
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "ecs-tasks.amazonaws.com" }, Action = "sts:AssumeRole" }] })
   tags               = local.tags
 }
+resource "aws_iam_role_policy" "match_archive" {
+  role = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.match_archive.arn },
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = "${aws_s3_bucket.match_archive.arn}/*" }
+    ]
+  })
+}
 
 resource "aws_cloudwatch_log_group" "backend" {
   name              = "/ecs/${var.name}"
@@ -212,7 +243,7 @@ resource "aws_ecs_task_definition" "backend" {
       { name = "AWS_REGION", value = var.aws_region }, { name = "COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.main.id },
       { name = "COGNITO_APP_CLIENT_ID", value = aws_cognito_user_pool_client.web.id }, { name = "PGHOST", value = aws_db_instance.main.address },
       { name = "PGPORT", value = tostring(aws_db_instance.main.port) }, { name = "PGDATABASE", value = "battleship" }, { name = "PGUSER", value = "battleship" },
-      { name = "PGSSLMODE", value = "verify-full" }
+      { name = "PGSSLMODE", value = "verify-full" }, { name = "MATCH_ARCHIVE_BUCKET", value = aws_s3_bucket.match_archive.id }
     ],
     secrets          = [{ name = "PGPASSWORD", valueFrom = "${aws_db_instance.main.master_user_secret[0].secret_arn}:password::" }],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.backend.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "backend" } },

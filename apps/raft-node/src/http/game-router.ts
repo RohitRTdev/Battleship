@@ -3,11 +3,12 @@ import { Router, type Request, type Response } from "express";
 import { domainError, type DomainError, type GameState, type Player, type Result } from "../game/index.js";
 import { GameRepository } from "../database/game-repository.js";
 import { GameUpdateBus } from "../database/update-bus.js";
+import type { MatchArchive } from "../archive/index.js";
 
 const GAME_CODE_PATTERN = /^[0-9A-HJKMNP-TV-Z]{8}$/;
 
 function statusFor(code: GameErrorCode): number {
-  if (code === "GAME_NOT_FOUND") return 404;
+  if (code === "GAME_NOT_FOUND" || code === "MATCH_NOT_FOUND") return 404;
   if (code === "PLAYER_NOT_IN_GAME") return 403;
   if (code === "DATABASE_UNAVAILABLE") return 503;
   if (["INVALID_REQUEST", "INVALID_GAME_CODE", "INVALID_FLEET_COMPOSITION", "SHIP_OUT_OF_BOUNDS", "SHIPS_OVERLAP", "SHIPS_ADJACENT", "INVALID_COORDINATE"].includes(code)) return 400;
@@ -73,7 +74,7 @@ async function readParticipantGame(
   return { ok: true, value: { state: state.value } };
 }
 
-export function createGameRouter(repository: GameRepository, updates: GameUpdateBus): Router {
+export function createGameRouter(repository: GameRepository, updates: GameUpdateBus, archive: MatchArchive): Router {
   const router = Router();
 
   const matchmakingUpdate = (response: Response, state: PlayerStateResponse): void => {
@@ -184,6 +185,36 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
 
   router.get("/player/state", async (request, response) => {
     response.json(await repository.getPlayerState(request.user!.id));
+  });
+
+  router.get("/player/profile", async (request, response) => {
+    const rawLimit = request.query.limit === undefined ? 20 : Number(request.query.limit);
+    const cursor = request.query.cursor === undefined ? null : String(request.query.cursor);
+    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 50 || (cursor !== null && cursor.length > 1_024)) {
+      return sendError(response, domainError("INVALID_REQUEST"));
+    }
+    try {
+      const page = await archive.listPlayerMatches(request.user!.id, cursor, rawLimit);
+      response.json({
+        player: { id: request.user!.id, username: request.user!.username },
+        ...page
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "INVALID_CURSOR") {
+        return sendError(response, domainError("INVALID_REQUEST"));
+      }
+      throw error;
+    }
+  });
+
+  router.get("/player/matches/:matchId", async (request, response) => {
+    const matchId = String(request.params.matchId ?? "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(matchId)) {
+      return sendError(response, domainError("INVALID_REQUEST"));
+    }
+    const match = await archive.getPlayerMatch(request.user!.id, matchId);
+    if (!match) return sendError(response, domainError("MATCH_NOT_FOUND"));
+    response.json({ match });
   });
 
   router.get("/games/:gameCode", async (request, response) => {

@@ -25,6 +25,7 @@ x-backend-environment: &backend-environment
   SERVICE_NAME: raft-backend
   DATABASE_URL: postgresql://${POSTGRES_USER:-battleship}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-battleship}
   RAFT_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
+  MATCH_ARCHIVE_PATH: /data/matches
 
 x-backend-common: &backend-common
   image: battleship/raft-node:dev
@@ -97,6 +98,7 @@ services:
       NODE_ID: backend-node-1
     volumes:
       - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./runtime/matches:/data/matches
 
   backend-node-2:
     <<: *backend-common
@@ -106,6 +108,7 @@ services:
       NODE_ID: backend-node-2
     volumes:
       - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./runtime/matches:/data/matches
 
   backend-node-3:
     <<: *backend-common
@@ -115,6 +118,7 @@ services:
       NODE_ID: backend-node-3
     volumes:
       - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./runtime/matches:/data/matches
 
   frontend:
     image: battleship/frontend:dev

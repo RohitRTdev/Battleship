@@ -7,6 +7,8 @@ import { runMigrations } from "./database/migrations.js";
 import { GameRepository } from "./database/game-repository.js";
 import { GameUpdateBus } from "./database/update-bus.js";
 import { createGameRouter } from "./http/game-router.js";
+import { createMatchArchive } from "./archive/index.js";
+import { ArchiveWorker } from "./archive/archive-worker.js";
 
 const serviceName = process.env.SERVICE_NAME ?? "raft-backend";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
@@ -38,6 +40,8 @@ database.on("error", (error) => {
 
 const repository = new GameRepository(database);
 const updates = new GameUpdateBus(database);
+const archive = createMatchArchive();
+const archiveWorker = new ArchiveWorker(database, archive, updates);
 
 async function initializeDatabase(): Promise<void> {
   while (true) {
@@ -50,6 +54,7 @@ async function initializeDatabase(): Promise<void> {
         migrationClient.release();
       }
       await updates.start();
+      archiveWorker.start();
       databaseReady = true;
       return;
     } catch (error) {
@@ -107,7 +112,7 @@ if (production) {
   app.use(express.static(frontendDirectory));
 }
 
-app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(repository, updates));
+app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(repository, updates, archive));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
@@ -145,6 +150,7 @@ function shutdown(): void {
   databaseReady = false;
   httpServer.close(() => {
     grpcServer.tryShutdown(() => {
+      archiveWorker.close();
       updates.close();
       void database.end().finally(() => process.exit(0));
     });

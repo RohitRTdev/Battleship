@@ -32,6 +32,7 @@ export const GAME_ERROR_CODES = [
   "INVALID_COORDINATE",
   "NOT_YOUR_TURN",
   "COORDINATE_ALREADY_ATTACKED",
+  "MATCH_NOT_FOUND",
   "DATABASE_UNAVAILABLE",
   "INTERNAL_ERROR"
 ] as const;
@@ -102,3 +103,52 @@ export type UpdateResponse =
       version: number;
       players: PlayerSummary[];
     };
+
+export type MatchOutcome = "WIN" | "LOSS";
+
+export type ArchivedPlayer = {
+  id: string;
+  username: string;
+  slot: 1 | 2;
+};
+
+export type PlayerStatistics = {
+  matchesPlayed: number;
+  wins: number;
+  losses: number;
+  surrenders: number;
+};
+
+export type PlayerMatchSummary = {
+  matchId: string;
+  gameCode: string;
+  startedAt: string;
+  endedAt: string;
+  players: ArchivedPlayer[];
+  outcome: MatchOutcome;
+  completionReason: Exclude<CompletionReason, "CANCELLED">;
+  surrendered: boolean;
+};
+
+export type PlayerProfileResponse = {
+  player: { id: string; username: string };
+  statistics: PlayerStatistics;
+  matches: PlayerMatchSummary[];
+  nextCursor: string | null;
+};
+
+export type ArchivedFleet = {
+  playerId: string;
+  ships: ShipView[];
+};
+
+export type ArchivedAttack = AttackView & { attackerPlayerId: string };
+
+export type ArchivedMatchDetail = PlayerMatchSummary & {
+  viewerPlayerId: string;
+  winnerPlayerId: string;
+  fleets: ArchivedFleet[];
+  attacks: ArchivedAttack[];
+};
+
+export type ArchivedMatchResponse = { match: ArchivedMatchDetail };

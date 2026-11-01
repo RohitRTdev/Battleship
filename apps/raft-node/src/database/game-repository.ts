@@ -103,6 +103,17 @@ async function notifyPlayerUpdate(client: PoolClient, playerId: string): Promise
   await client.query("SELECT pg_notify('player_state_updates', $1)", [JSON.stringify({ playerId })]);
 }
 
+async function enqueueArchive(client: PoolClient, state: GameState): Promise<void> {
+  if (state.status !== "FINISHED" || state.completionReason === "CANCELLED") return;
+  await client.query(
+    `INSERT INTO match_archive_jobs (game_id, snapshot)
+     VALUES ($1, $2::jsonb)
+     ON CONFLICT (game_id) DO NOTHING`,
+    [state.gameId, JSON.stringify(state)]
+  );
+  await client.query("SELECT pg_notify('match_archive_jobs', $1)", [JSON.stringify({ gameId: state.gameId })]);
+}
+
 async function lockMatchmaking(client: PoolClient): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [MATCHMAKING_LOCK_KEY]);
 }
@@ -240,6 +251,7 @@ export class GameRepository {
       await updateMetadata(client, next);
       if (next.status === "FINISHED") {
         await client.query("DELETE FROM active_player_games WHERE game_id = $1", [next.gameId]);
+        await enqueueArchive(client, next);
       }
       await notifyUpdate(client, next);
       await client.query("COMMIT");
