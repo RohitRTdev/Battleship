@@ -90,8 +90,7 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     response.status(400).json({ error: { code: "INVALID_REQUEST", message: "The request body is invalid." } });
     return;
   }
-  const databaseFailure = typeof candidate.code === "string" &&
-    (/^\d{5}$/.test(candidate.code) || candidate.code.startsWith("ECONN"));
+  const databaseFailure = backend.isUnavailableError(error);
   response.status(databaseFailure ? 503 : 500).json({
     error: databaseFailure
       ? { code: "DATABASE_UNAVAILABLE", message: "The game database is unavailable." }

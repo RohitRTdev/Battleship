@@ -1,5 +1,6 @@
 import type { ArchiveOutbox } from "./archive-outbox.js";
 import type { GameStore, UpdateBus } from "./game-store.js";
+import { createEtcdBackend } from "./etcd/backend.js";
 import { createPostgresBackend } from "./postgres/backend.js";
 
 export type StoreOptions = { timeoutEnabled: boolean };
@@ -15,16 +16,20 @@ export type StoreBackend = {
   isReady(): boolean;
   /** Probes the storage and updates readiness. */
   checkHealth(): Promise<boolean>;
+  /** True if `error` means the storage is unreachable, so the request should get a 503. */
+  isUnavailableError(error: unknown): boolean;
   close(): Promise<void>;
 };
 
-export const STORE_MODES = ["postgres"] as const;
+export const STORE_MODES = ["postgres", "etcd"] as const;
 export type StoreMode = (typeof STORE_MODES)[number];
 
 export function createStoreBackend(mode: string, options: StoreOptions): StoreBackend {
   switch (mode as StoreMode) {
     case "postgres":
       return createPostgresBackend(options);
+    case "etcd":
+      return createEtcdBackend(options);
     default:
       throw new Error(`STORE_MODE must be one of: ${STORE_MODES.join(", ")}`);
   }

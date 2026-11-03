@@ -63,6 +63,12 @@ export function createPostgresBackend(options: StoreOptions): StoreBackend {
       return ready;
     },
 
+    isUnavailableError(error) {
+      // SQLSTATE codes are five characters; ECONN* are connection failures.
+      const code = (error as { code?: unknown }).code;
+      return typeof code === "string" && (/^\d{5}$/.test(code) || code.startsWith("ECONN"));
+    },
+
     async close() {
       ready = false;
       updates.close();
