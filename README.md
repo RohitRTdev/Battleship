@@ -51,6 +51,14 @@ Show command usage:
 
 By default, both players share 60 seconds to submit their fleets; the game is cancelled if either player has not submitted in time. Each active turn lasts 30 seconds, with a 500 ms server-side delivery grace period. A player who runs out of time loses the match. To disable the timer for testing, set `DISABLE_TIMEOUT=true` in `.env` before starting development or deploying production. The setting applies to all backend instances; restart the deployment after changing it. Use a fresh database when changing this setting.
 
+## Tests
+
+```sh
+npm test
+```
+
+Runs the game-service store tests against a throwaway PostgreSQL container (Docker required). The same suite in `apps/game-service/test/store-contract.ts` is meant to run against every store implementation.
+
 ## Test bots
 
 To use the test scripts in production (cloud deployed), first run:

@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspace=@battleship/protocol && npm run build --workspace=@battleship/auth-token && npm run build --workspace=@battleship/game-contract && npm run build --workspace=@battleship/auth-service && npm run build --workspace=@battleship/game-service && npm run build --workspace=@battleship/frontend",
+    "test": "npm test --workspace=@battleship/game-service",
     "clean": "npm run clean --workspaces --if-present"
   },
   "engines": {
