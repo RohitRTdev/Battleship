@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { Pool, PoolClient } from "pg";
-import type { UpdateBus } from "../store/game-store.js";
+import type { UpdateBus } from "../game-store.js";
 
 type UpdatePayload = { gameId: string; version: number };
 type PlayerUpdatePayload = { playerId: string };

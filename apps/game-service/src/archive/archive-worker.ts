@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import type { GameState } from "../game/index.js";
-import type { GameUpdateBus } from "../database/update-bus.js";
+import type { GameUpdateBus } from "../store/postgres/update-bus.js";
 import type { MatchArchive } from "./match-archive.js";
 
 type ArchiveJobRow = { game_id: string; snapshot: GameState; attempts: number };

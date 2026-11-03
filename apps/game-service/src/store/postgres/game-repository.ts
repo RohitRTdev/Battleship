@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { ConnectionStatus, GameStatus, PlayerStateResponse } from "@battleship/game-contract";
 import type { Pool, PoolClient } from "pg";
-import type { CommandResult, GameStore } from "../store/game-store.js";
+import type { CommandResult, GameStore } from "../game-store.js";
 import {
   applyGameCommand,
   createGame,
@@ -14,7 +14,7 @@ import {
   type PersistedCommand,
   type Player,
   type Result
-} from "../game/index.js";
+} from "../../game/index.js";
 
 const CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
