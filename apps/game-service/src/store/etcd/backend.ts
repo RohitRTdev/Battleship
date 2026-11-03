@@ -1,14 +1,10 @@
-import { Etcd3, GRPCDeadlineExceededError, GRPCUnavailableError } from "etcd3";
+import { Etcd3 } from "etcd3";
 import type { StoreBackend, StoreOptions } from "../index.js";
+import { isEtcdUnavailable } from "./errors.js";
 import { EtcdArchiveOutbox, EtcdStore, EtcdUpdateBus } from "./etcd-store.js";
 import { keys, NAMESPACE } from "./keys.js";
 
 const CALL_TIMEOUT_MS = 2_000;
-
-export function isEtcdUnavailable(error: unknown): boolean {
-  return error instanceof GRPCUnavailableError || error instanceof GRPCDeadlineExceededError ||
-    (error instanceof Error && error.name === "BrokenCircuitError");
-}
 
 export function createEtcdBackend(options: StoreOptions): StoreBackend {
   const endpoints = (process.env.ETCD_ENDPOINTS ?? "").split(",").map((endpoint) => endpoint.trim()).filter(Boolean);

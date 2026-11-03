@@ -101,8 +101,11 @@ describe("etcd backend", () => {
   test("classifies connection failures as unavailable", async () => {
     const client = new Etcd3({ hosts: "127.0.0.1:1", dialTimeout: 500, defaultCallOptions: () => ({ deadline: Date.now() + 500 }) });
     try {
-      const failure = await client.get("x").string().then(() => assert.fail("expected a connection failure"), (caught: unknown) => caught);
-      assert.equal(unreachable.isUnavailableError(failure), true, `not classified: ${String(failure)}`);
+      // Enough calls to trip the client's circuit breaker, whose error is classified separately.
+      for (let call = 0; call < 6; call += 1) {
+        const failure = await client.get("x").string().then(() => assert.fail("expected a connection failure"), (caught: unknown) => caught);
+        assert.equal(unreachable.isUnavailableError(failure), true, `call ${call} not classified: ${String(failure)}`);
+      }
       assert.equal(unreachable.isUnavailableError(new Error("unrelated")), false);
     } finally {
       client.close();
