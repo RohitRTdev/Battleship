@@ -33,10 +33,7 @@ defineStoreContract("etcd", {
   async reset() {
     await admin.namespace(NAMESPACE).delete().all();
   },
-  pending: [
-    "a finished game queues exactly one archive job",
-    "a failed archive write is retried later instead of being lost"
-  ]
+  pending: []
 });
 
 describe("etcd store", () => {
@@ -72,6 +69,56 @@ describe("etcd store", () => {
 
       ok(await backend.store.command(created.gameCode, second, (_state, occurredAt) => ({ type: "CANCEL_GAME", actor: second, occurredAt })));
       assert.deepEqual(await admin.namespace(NAMESPACE).getAll().prefix(keys.presencePrefix(state.gameId)).keys(), []);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  async function finishedGame(backend: StoreBackend, tag: string): Promise<string> {
+    const first = { id: `${tag}-first`, username: "first" };
+    const second = { id: `${tag}-second`, username: "second" };
+    const code = ok(await backend.store.create(first)).state.gameCode;
+    ok(await backend.store.command(code, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+    for (const player of [first, second]) {
+      ok(await backend.store.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: [
+        { start: { row: 0, column: 0 }, end: { row: 0, column: 4 } }, { start: { row: 2, column: 0 }, end: { row: 2, column: 3 } },
+        { start: { row: 4, column: 0 }, end: { row: 4, column: 2 } }, { start: { row: 6, column: 0 }, end: { row: 6, column: 2 } },
+        { start: { row: 8, column: 0 }, end: { row: 8, column: 1 } }], occurredAt })));
+    }
+    return ok(await backend.store.command(code, second, (_state, occurredAt) => ({ type: "SURRENDER", actor: second, occurredAt }))).state.gameId;
+  }
+
+  test("two nodes never archive the same game at the same time", async () => {
+    const nodes = [backendFor(endpoints), backendFor(endpoints)];
+    for (const node of nodes) await node.start();
+    try {
+      await admin.namespace(NAMESPACE).delete().all();
+      await finishedGame(nodes[0], "exclusive");
+      let release = () => {};
+      const slowArchive = new Promise<void>((resolve) => { release = resolve; });
+      const first = nodes[0].outbox.processNext(() => slowArchive);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal((await nodes[1].outbox.processNext(async () => assert.fail("archived twice"))).kind, "empty");
+      release();
+      assert.equal((await first).kind, "archived");
+      assert.equal((await nodes[1].outbox.processNext(async () => assert.fail("archived twice"))).kind, "empty");
+    } finally {
+      for (const node of nodes) await node.close();
+    }
+  });
+
+  test("a claim left by a crashed node expires and the job is archived", async () => {
+    const backend = backendFor(endpoints);
+    await backend.start();
+    try {
+      await admin.namespace(NAMESPACE).delete().all();
+      const gameId = await finishedGame(backend, "crashed");
+      // A claim whose lease nobody renews, as if its node died mid-archive.
+      const orphan = admin.namespace(NAMESPACE).lease(2, { autoKeepAlive: false });
+      await orphan.put(keys.archiveClaim(gameId)).value("");
+      assert.equal((await backend.outbox.processNext(async () => assert.fail("claimed job processed"))).kind, "empty");
+      await new Promise((resolve) => setTimeout(resolve, 3_500));
+      assert.equal((await backend.outbox.processNext(async () => {})).kind, "archived");
     } finally {
       await backend.close();
     }

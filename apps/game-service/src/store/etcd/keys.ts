@@ -16,6 +16,8 @@ export const keys = {
   presencePrefix: (gameId: string) => `presence/${gameId}/`,
   archiveJob: (gameId: string) => `archive/jobs/${gameId}`,
   archivePrefix: "archive/jobs/",
+  /** Exists (bound to a lease) while a node is archiving the game. */
+  archiveClaim: (gameId: string) => `archive/claims/${gameId}`,
   /** Sorts by deadline: ISO-8601 UTC timestamps compare correctly as strings. */
   deadline: (deadlineAt: string, gameId: string) => `deadlines/${deadlineAt}/${gameId}`,
   deadlinePrefix: "deadlines/",

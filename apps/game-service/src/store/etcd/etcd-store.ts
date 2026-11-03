@@ -14,8 +14,8 @@ import {
   type Player,
   type Result
 } from "../../game/index.js";
-import type { ArchiveJobResult, ArchiveOutbox } from "../archive-outbox.js";
 import type { CommandResult, GameStore } from "../game-store.js";
+import type { ArchiveJob } from "./archive-outbox.js";
 import { isEtcdUnavailable } from "./errors.js";
 import { decode, encode, keys } from "./keys.js";
 
@@ -343,7 +343,7 @@ export class EtcdStore implements GameStore {
 
   /**
    * The writes that move a stored game from `previous` to `next`: the game itself, its entries in the
-   * deadline index, and, once it finishes, freeing both players and dropping their presence.
+   * deadline index, and, once it finishes, freeing both players, dropping their presence and queueing the archive job.
    */
   private transitionWrites(previous: GameState, next: GameState): IOperation[] {
     const writes: IOperation[] = [this.kv.put(keys.game(next.gameId)).value(encode(next))];
@@ -359,16 +359,12 @@ export class EtcdStore implements GameStore {
         if (player) writes.push(this.kv.delete().key(keys.activeGame(player.id)));
       }
       writes.push(this.kv.delete().prefix(keys.presencePrefix(next.gameId)));
+      // Cancelled games are not archived (as in the Postgres store).
+      if (next.completionReason !== "CANCELLED") {
+        const job: ArchiveJob = { snapshot: next, attempts: 0, availableAt: next.endedAt ?? new Date().toISOString() };
+        writes.push(this.kv.put(keys.archiveJob(next.gameId)).value(encode(job)));
+      }
     }
     return writes;
   }
-}
-
-/** Placeholder until archive jobs are written to etcd: there are never any jobs. */
-export class EtcdArchiveOutbox implements ArchiveOutbox {
-  async processNext(): Promise<ArchiveJobResult> {
-    return { kind: "empty" };
-  }
-  onJob(): void {}
-  offJob(): void {}
 }

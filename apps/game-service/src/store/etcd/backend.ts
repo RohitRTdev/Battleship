@@ -1,7 +1,8 @@
 import { Etcd3 } from "etcd3";
 import type { StoreBackend, StoreOptions } from "../index.js";
 import { isEtcdUnavailable } from "./errors.js";
-import { EtcdArchiveOutbox, EtcdStore } from "./etcd-store.js";
+import { EtcdArchiveOutbox } from "./archive-outbox.js";
+import { EtcdStore } from "./etcd-store.js";
 import { EtcdUpdateBus } from "./watch-bus.js";
 import { keys, NAMESPACE } from "./keys.js";
 
@@ -28,7 +29,7 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
   return {
     store: new EtcdStore(kv, options.timeoutEnabled),
     updates,
-    outbox: new EtcdArchiveOutbox(),
+    outbox: new EtcdArchiveOutbox(kv, updates),
 
     async start() {
       while (true) {
