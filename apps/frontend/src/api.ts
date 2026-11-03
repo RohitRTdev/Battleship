@@ -15,7 +15,7 @@ export class SessionExpiredError extends Error {
   }
 }
 
-type RequestOptions = { method?: string; body?: unknown; signal?: AbortSignal };
+type RequestOptions = { method?: string; body?: unknown; signal?: AbortSignal; onTiming?: (start: number, end: number) => void };
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export function createApi(auth: AuthProvider) {
@@ -26,7 +26,9 @@ export function createApi(auth: AuthProvider) {
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted) controller.abort();
     const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, REQUEST_TIMEOUT_MS);
-    const send = async (token: string) => fetch(path, {
+    const send = async (token: string) => {
+      const start = performance.now();
+      const response = await fetch(path, {
       method: options.method ?? "GET",
       signal: controller.signal,
       cache: "no-store",
@@ -35,7 +37,10 @@ export function createApi(auth: AuthProvider) {
         ...(options.body === undefined ? {} : { "Content-Type": "application/json" })
       },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
-    });
+      });
+      options.onTiming?.(start, performance.now());
+      return response;
+    };
 
     try {
       let response = await send(await auth.getAccessToken());
@@ -62,6 +67,11 @@ export function createApi(auth: AuthProvider) {
   }
 
   return {
+    serverTime: async () => {
+      let start = 0; let end = 0;
+      const result = await request<{ serverNow: string }>("/api/backend/time", { onTiming: (sent, received) => { start = sent; end = received; } });
+      return { ...result, start, end };
+    },
     playerState: () => request<PlayerStateResponse>("/api/backend/player/state"),
     playerProfile: (cursor?: string, limit = 20) => request<PlayerProfileResponse>(`/api/backend/player/profile?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
     archivedMatch: (matchId: string, signal?: AbortSignal) => request<ArchivedMatchResponse>(`/api/backend/player/matches/${encodeURIComponent(matchId)}`, { signal }),

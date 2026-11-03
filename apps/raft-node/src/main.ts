@@ -38,7 +38,20 @@ database.on("error", (error) => {
   console.error("PostgreSQL pool error", error);
 });
 
-const repository = new GameRepository(database);
+const disableTimeout = process.env.DISABLE_TIMEOUT ?? "false";
+if (disableTimeout !== "true" && disableTimeout !== "false") throw new Error("DISABLE_TIMEOUT must be true or false");
+const timeoutEnabled = disableTimeout === "false";
+const repository = new GameRepository(database, timeoutEnabled);
+let timeoutWorkerRunning = false;
+let timeoutWorkerClosed = false;
+async function expireTurns(): Promise<void> {
+  if (timeoutWorkerRunning || timeoutWorkerClosed) return;
+  timeoutWorkerRunning = true;
+  try { while (!timeoutWorkerClosed && await repository.expireOneTurn()) { /* drain expired games */ } }
+  catch (error) { console.error("Turn timeout worker failed", error); }
+  finally { timeoutWorkerRunning = false; }
+}
+let timeoutTimer: NodeJS.Timeout | null = null;
 const updates = new GameUpdateBus(database);
 const archive = createMatchArchive();
 const archiveWorker = new ArchiveWorker(database, archive, updates);
@@ -55,6 +68,7 @@ async function initializeDatabase(): Promise<void> {
       }
       await updates.start();
       archiveWorker.start();
+      if (timeoutEnabled && !timeoutTimer) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
       databaseReady = true;
       return;
     } catch (error) {
@@ -150,6 +164,8 @@ function shutdown(): void {
   databaseReady = false;
   httpServer.close(() => {
     grpcServer.tryShutdown(() => {
+      timeoutWorkerClosed = true;
+      if (timeoutTimer) clearInterval(timeoutTimer);
       archiveWorker.close();
       updates.close();
       void database.end().finally(() => process.exit(0));

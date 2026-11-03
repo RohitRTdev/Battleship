@@ -28,6 +28,7 @@ setup_env() {
   else
     echo "ENABLE_TEST_ROUTES=true" >> ".env"
   fi
+  grep -q '^DISABLE_TIMEOUT=' ".env" || echo "DISABLE_TIMEOUT=false" >> ".env"
   grep -q '^AWS_PROFILE=.' ".env" || echo "AWS_PROFILE=default" >> ".env"
   grep -q '^AWS_REGION=.' ".env" || echo "AWS_REGION=ap-south-1" >> ".env"
   grep -q '^PROD_STACK_NAME=.' ".env" || echo "PROD_STACK_NAME=battleship-prod" >> ".env"
@@ -108,7 +109,7 @@ up_prod() {
 
   echo "Deploying AWS application resources..."
   terraform -chdir=infra/terraform/app init -input=false
-  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="backend_image=$backend_image"
+  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=$backend_image"
 
   public_url=$(terraform -chdir=infra/terraform/app output -raw public_url)
   user_pool_id=$(terraform -chdir=infra/terraform/app output -raw cognito_user_pool_id)
@@ -131,7 +132,7 @@ down_prod() {
     echo "No local production Terraform state was found; refusing an unscoped deletion." >&2
     exit 1
   fi
-  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="backend_image=destroy"
+  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=destroy"
   terraform -chdir=infra/terraform/bootstrap destroy -auto-approve -input=false $(terraform_args)
   rm -rf .deployment
   echo "Production resources and data were deleted."

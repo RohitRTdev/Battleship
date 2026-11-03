@@ -52,6 +52,8 @@ export function projectGame(state: GameState, viewerId: string, presence: Presen
     players,
     yourPlayerId: viewerId,
     currentTurn: state.currentTurn,
+    turnDeadlineAt: state.turnDeadlineAt,
+    placementDeadlineAt: state.placementDeadlineAt,
     isYourTurn: state.currentTurn === viewerId,
     yourFleet: ownFleet ? shipViews(state, viewerId, ownFleet) : null,
     yourAttacks: attackViews(state, viewerId),

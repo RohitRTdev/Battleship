@@ -23,6 +23,7 @@ x-node-healthcheck: &node-healthcheck
 x-backend-environment: &backend-environment
   <<: *topology-environment
   SERVICE_NAME: raft-backend
+  DISABLE_TIMEOUT: ${DISABLE_TIMEOUT:-false}
   DATABASE_URL: postgresql://${POSTGRES_USER:-battleship}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-battleship}
   RAFT_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
   MATCH_ARCHIVE_PATH: /data/matches

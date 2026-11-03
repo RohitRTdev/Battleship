@@ -1,7 +1,7 @@
 export const GAME_STATUSES = ["WAITING", "PLACEMENT", "ACTIVE", "FINISHED"] as const;
 export type GameStatus = (typeof GAME_STATUSES)[number];
 
-export const COMPLETION_REASONS = ["FLEET_DESTROYED", "SURRENDER", "CANCELLED"] as const;
+export const COMPLETION_REASONS = ["FLEET_DESTROYED", "SURRENDER", "CANCELLED", "TIMEOUT"] as const;
 export type CompletionReason = (typeof COMPLETION_REASONS)[number];
 
 export const ATTACK_RESULTS = ["MISS", "HIT", "SUNK", "WIN"] as const;
@@ -31,6 +31,7 @@ export const GAME_ERROR_CODES = [
   "SHIPS_ADJACENT",
   "INVALID_COORDINATE",
   "NOT_YOUR_TURN",
+  "TURN_TIMED_OUT",
   "COORDINATE_ALREADY_ATTACKED",
   "MATCH_NOT_FOUND",
   "DATABASE_UNAVAILABLE",
@@ -76,6 +77,8 @@ export type PlayerGameView = {
   players: PlayerSummary[];
   yourPlayerId: string;
   currentTurn: string | null;
+  turnDeadlineAt: string | null;
+  placementDeadlineAt: string | null;
   isYourTurn: boolean;
   yourFleet: ShipView[] | null;
   yourAttacks: AttackView[];

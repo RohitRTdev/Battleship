@@ -77,7 +77,7 @@ async function updateMetadata(client: PoolClient, state: GameState): Promise<voi
        status = $2, version = $3,
        player_two_id = $4, player_two_username = $5,
        winner_player_id = $6, completion_reason = $7,
-       started_at = $8, ended_at = $9
+       started_at = $8, ended_at = $9, turn_deadline_at = $10, placement_deadline_at = $11
      WHERE id = $1`,
     [
       state.gameId,
@@ -88,7 +88,9 @@ async function updateMetadata(client: PoolClient, state: GameState): Promise<voi
       state.winnerPlayerId,
       state.completionReason,
       state.startedAt,
-      state.endedAt
+      state.endedAt,
+      state.turnDeadlineAt,
+      state.placementDeadlineAt
     ]
   );
 }
@@ -154,7 +156,12 @@ function failed<T>(error: DomainError): Result<T> {
 }
 
 export class GameRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly timeoutEnabled = true) {}
+
+  async currentTime(): Promise<string> {
+    const result = await this.pool.query<TimestampRow>("SELECT clock_timestamp() AS now");
+    return normalizeTime(result.rows[0].now);
+  }
 
   async create(actor: Player): Promise<Result<CommandResult>> {
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -170,6 +177,7 @@ export class GameRepository {
           type: "CREATE_GAME" as const,
           gameId: randomUUID(),
           gameCode: generateGameCode(),
+          turnTimeoutEnabled: this.timeoutEnabled,
           actor,
           occurredAt: await databaseTime(client)
         };
@@ -225,7 +233,25 @@ export class GameRepository {
         return failed(domainError("GAME_NOT_FOUND"));
       }
       const state = await loadState(client, game.rows[0].id);
-      const command = buildCommand(state, await databaseTime(client));
+      const now = await databaseTime(client);
+      const command = buildCommand(state, now);
+      if ((command.type === "FIRE" || command.type === "SURRENDER") && state.status === "ACTIVE" && state.turnDeadlineAt && (state.playerOne.id === actor.id || state.playerTwo?.id === actor.id) && Date.parse(now) >= Date.parse(state.turnDeadlineAt) + 500) {
+        const timedOut = state.currentTurn === state.playerOne.id ? state.playerOne : state.playerTwo!;
+        const timeoutCommand: GameCommand = { type: "TURN_TIMEOUT", actor: timedOut, deadline: state.turnDeadlineAt, occurredAt: now };
+        const timeout = applyGameCommand(state, timeoutCommand);
+        if (!timeout.ok) throw new Error(timeout.error.code);
+        await this.persistTransition(client, timeout.value.state, timeoutCommand);
+        await client.query("COMMIT");
+        return failed(domainError("TURN_TIMED_OUT"));
+      }
+      if (command.type === "PLACE_FLEET" && state.status === "PLACEMENT" && state.placementDeadlineAt && (state.playerOne.id === actor.id || state.playerTwo?.id === actor.id) && Date.parse(now) >= Date.parse(state.placementDeadlineAt) + 500) {
+        const timeoutCommand: GameCommand = { type: "PLACEMENT_TIMEOUT", actor: state.playerOne, deadline: state.placementDeadlineAt, occurredAt: now };
+        const timeout = applyGameCommand(state, timeoutCommand);
+        if (!timeout.ok) throw new Error(timeout.error.code);
+        await this.persistTransition(client, timeout.value.state, timeoutCommand);
+        await client.query("COMMIT");
+        return failed(domainError("GAME_CANCELLED"));
+      }
       const applied = applyGameCommand(state, command);
       if (!applied.ok) {
         await client.query("ROLLBACK");
@@ -247,13 +273,7 @@ export class GameRepository {
           throw error;
         }
       }
-      await insertEvent(client, next, eventCommand(applied.value.event));
-      await updateMetadata(client, next);
-      if (next.status === "FINISHED") {
-        await client.query("DELETE FROM active_player_games WHERE game_id = $1", [next.gameId]);
-        await enqueueArchive(client, next);
-      }
-      await notifyUpdate(client, next);
+      await this.persistTransition(client, next, eventCommand(applied.value.event));
       await client.query("COMMIT");
       return { ok: true, value: { state: next, outcome: applied.value.outcome } };
     } catch (error) {
@@ -262,6 +282,48 @@ export class GameRepository {
     } finally {
       client.release();
     }
+  }
+
+  private async persistTransition(client: PoolClient, state: GameState, command: PersistedCommand): Promise<void> {
+    await insertEvent(client, state, command);
+    await updateMetadata(client, state);
+    if (state.status === "FINISHED") {
+      await client.query("DELETE FROM active_player_games WHERE game_id = $1", [state.gameId]);
+      await enqueueArchive(client, state);
+    }
+    await notifyUpdate(client, state);
+  }
+
+  async expireOneTurn(): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const rows = await client.query<GameRow>(`SELECT id FROM games
+        WHERE (status = 'ACTIVE' AND turn_deadline_at <= clock_timestamp() - interval '500 milliseconds')
+           OR (status = 'PLACEMENT' AND placement_deadline_at <= clock_timestamp() - interval '500 milliseconds')
+        ORDER BY COALESCE(turn_deadline_at, placement_deadline_at) LIMIT 1 FOR UPDATE SKIP LOCKED`);
+      if (!rows.rows[0]) { await client.query("COMMIT"); return false; }
+      const state = await loadState(client, rows.rows[0].id);
+      const now = await databaseTime(client);
+      if (state.status === "ACTIVE" && state.turnDeadlineAt && state.currentTurn && Date.parse(now) >= Date.parse(state.turnDeadlineAt) + 500) {
+        const actor = state.currentTurn === state.playerOne.id ? state.playerOne : state.playerTwo!;
+        const command: GameCommand = { type: "TURN_TIMEOUT", actor, deadline: state.turnDeadlineAt, occurredAt: now };
+        const result = applyGameCommand(state, command);
+        if (!result.ok) throw new Error(result.error.code);
+        await this.persistTransition(client, result.value.state, command);
+      }
+      else if (state.status === "PLACEMENT" && state.placementDeadlineAt && Date.parse(now) >= Date.parse(state.placementDeadlineAt) + 500) {
+        const command: GameCommand = { type: "PLACEMENT_TIMEOUT", actor: state.playerOne, deadline: state.placementDeadlineAt, occurredAt: now };
+        const result = applyGameCommand(state, command);
+        if (!result.ok) throw new Error(result.error.code);
+        await this.persistTransition(client, result.value.state, command);
+      }
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
   }
 
   async getState(gameCode: string): Promise<Result<GameState>> {
@@ -350,6 +412,7 @@ export class GameRepository {
           type: "CREATE_GAME" as const,
           gameId: randomUUID(),
           gameCode: generateGameCode(),
+          turnTimeoutEnabled: this.timeoutEnabled,
           actor: queuedPlayer,
           occurredAt: await databaseTime(client)
         };
@@ -362,12 +425,12 @@ export class GameRepository {
         const inserted = await client.query(
           `INSERT INTO games (
              id, code, status, version, player_one_id, player_one_username,
-             player_two_id, player_two_username, created_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             player_two_id, player_two_username, created_at, placement_deadline_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            ON CONFLICT (code) DO NOTHING
            RETURNING id`,
           [state.gameId, state.gameCode, state.status, state.version, queuedPlayer.id, queuedPlayer.username,
-            actor.id, actor.username, state.createdAt]
+            actor.id, actor.username, state.createdAt, state.placementDeadlineAt]
         );
         if (!inserted.rows[0]) continue;
         await insertEvent(client, created.value.state, eventCommand(created.value.event));

@@ -16,8 +16,10 @@ const migrations = [
         player_two_id TEXT,
         player_two_username TEXT,
         winner_player_id TEXT,
-        completion_reason TEXT CHECK (completion_reason IS NULL OR completion_reason IN ('FLEET_DESTROYED', 'SURRENDER', 'CANCELLED')),
+        completion_reason TEXT CHECK (completion_reason IS NULL OR completion_reason IN ('FLEET_DESTROYED', 'SURRENDER', 'CANCELLED', 'TIMEOUT')),
         created_at TIMESTAMPTZ NOT NULL,
+        turn_deadline_at TIMESTAMPTZ,
+        placement_deadline_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ,
         ended_at TIMESTAMPTZ,
         CONSTRAINT games_code_unique UNIQUE (code),
@@ -25,13 +27,15 @@ const migrations = [
         CONSTRAINT games_players_distinct CHECK (player_two_id IS NULL OR player_one_id <> player_two_id)
       );
 
+      CREATE INDEX games_active_deadline_idx ON games (turn_deadline_at) WHERE status = 'ACTIVE' AND turn_deadline_at IS NOT NULL;
+      CREATE INDEX games_placement_deadline_idx ON games (placement_deadline_at) WHERE status = 'PLACEMENT' AND placement_deadline_at IS NOT NULL;
       CREATE INDEX games_player_one_status_idx ON games (player_one_id, status);
       CREATE INDEX games_player_two_status_idx ON games (player_two_id, status);
 
       CREATE TABLE game_events (
         game_id UUID NOT NULL REFERENCES games(id) ON DELETE CASCADE,
         version INTEGER NOT NULL CHECK (version >= 1),
-        event_type TEXT NOT NULL CHECK (event_type IN ('CREATE_GAME', 'JOIN_GAME', 'PLACE_FLEET', 'FIRE', 'CANCEL_GAME', 'SURRENDER')),
+        event_type TEXT NOT NULL CHECK (event_type IN ('CREATE_GAME', 'JOIN_GAME', 'PLACE_FLEET', 'FIRE', 'CANCEL_GAME', 'SURRENDER', 'TURN_TIMEOUT', 'PLACEMENT_TIMEOUT')),
         actor_player_id TEXT NOT NULL,
         payload JSONB NOT NULL,
         occurred_at TIMESTAMPTZ NOT NULL,
