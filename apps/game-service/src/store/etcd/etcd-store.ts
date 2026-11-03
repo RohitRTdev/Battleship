@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ConnectionStatus, PlayerStateResponse } from "@battleship/game-contract";
 import type { IKeyValue, IRangeResponse, Namespace } from "etcd3";
 import {
+  applyGameCommand,
   createGame,
   domainError,
   generateGameCode,
@@ -20,6 +21,12 @@ export type ActiveGame = { gameId: string; gameCode: string };
 export type QueueEntry = { username: string; enqueuedAt: string };
 
 const CODE_ATTEMPTS = 8;
+const COMMAND_ATTEMPTS = 50;
+
+/** Short random wait before retrying a conflicting write, so racing requests spread out. */
+function backoff(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(50, 2 * attempt)));
+}
 
 function notImplemented(operation: string): never {
   throw new Error(`etcd store: ${operation} is not implemented yet`);
@@ -83,11 +90,47 @@ export class EtcdStore implements GameStore {
   }
 
   async command(
-    _gameCode: string,
-    _actor: Player,
-    _buildCommand: (state: GameState, occurredAt: string) => GameCommand
+    gameCode: string,
+    actor: Player,
+    buildCommand: (state: GameState, occurredAt: string) => GameCommand
   ): Promise<Result<CommandResult>> {
-    return notImplemented("command");
+    for (let attempt = 0; attempt < COMMAND_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await backoff(attempt);
+      if (await this.kv.get(keys.queueEntry(actor.id)).string()) return failed("PLAYER_ALREADY_SEARCHING");
+      const game = await this.readGame(gameCode);
+      if (!game) return failed("GAME_NOT_FOUND");
+
+      const command = buildCommand(game.state, await this.currentTime());
+      const applied = applyGameCommand(game.state, command);
+      if (!applied.ok) return applied;
+      const next = applied.value.state;
+
+      // Commit only if nobody changed the game (or started this player searching) since we read it.
+      let transaction = this.kv
+        .if(keys.game(next.gameId), "Mod", "==", game.modRevision)
+        .and(keys.queueEntry(actor.id), "Create", "==", 0);
+      const writes = [this.kv.put(keys.game(next.gameId)).value(encode(next))];
+      if (command.type === "JOIN_GAME") {
+        transaction = transaction.and(keys.activeGame(actor.id), "Create", "==", 0);
+        const active: ActiveGame = { gameId: next.gameId, gameCode: next.gameCode };
+        writes.push(this.kv.put(keys.activeGame(actor.id)).value(encode(active)));
+      }
+      const deletes = next.status === "FINISHED"
+        ? [next.playerOne, next.playerTwo].filter((player) => player !== null).map((player) => this.kv.delete().key(keys.activeGame(player.id)))
+        : [];
+
+      const result = await transaction
+        .then(...writes, ...deletes)
+        .else(this.kv.get(keys.queueEntry(actor.id)), this.kv.get(keys.activeGame(actor.id)))
+        .commit();
+      if (result.succeeded) return { ok: true, value: { state: next, outcome: applied.value.outcome } };
+
+      const [searching, playing] = result.responses.map((response) => firstKv(response.response_range));
+      if (searching) return failed("PLAYER_ALREADY_SEARCHING");
+      if (command.type === "JOIN_GAME" && playing) return failed("PLAYER_ALREADY_PLAYING");
+      // The game changed underneath us: retry against the new state.
+    }
+    throw new Error(`etcd store: too many conflicting writes to game ${gameCode}`);
   }
 
   async getState(gameCode: string): Promise<Result<GameState>> {
@@ -111,13 +154,13 @@ export class EtcdStore implements GameStore {
   }
 
   /** Reads a game by code, with the revision its key was last modified at (for compare-and-swap). */
-  private async readGame(gameCode: string): Promise<{ state: GameState; modRevision: string; revision: string } | null> {
+  private async readGame(gameCode: string): Promise<{ state: GameState; modRevision: string } | null> {
     const code = await this.kv.get(keys.code(gameCode)).exec();
     const gameId = firstKv(code)?.value.toString();
     if (!gameId) return null;
     const game = firstKv(await this.kv.get(keys.game(gameId)).revision(code.header.revision).exec());
     if (!game) return null;
-    return { state: decode<GameState>(game.value), modRevision: game.mod_revision, revision: code.header.revision };
+    return { state: decode<GameState>(game.value), modRevision: game.mod_revision };
   }
 
   async startMatchmaking(_actor: Player): Promise<Result<PlayerStateResponse>> {

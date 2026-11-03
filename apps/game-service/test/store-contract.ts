@@ -47,6 +47,7 @@ const join = (actor: Player): Build => (_state, occurredAt) => ({ type: "JOIN_GA
 const place = (actor: Player): Build => (_state, occurredAt) => ({ type: "PLACE_FLEET", actor, ships: FLEET, occurredAt });
 const fire = (actor: Player, coordinate: Coordinate): Build => (_state, occurredAt) => ({ type: "FIRE", actor, coordinate, occurredAt });
 const cancel = (actor: Player): Build => (_state, occurredAt) => ({ type: "CANCEL_GAME", actor, occurredAt });
+const surrender = (actor: Player): Build => (_state, occurredAt) => ({ type: "SURRENDER", actor, occurredAt });
 
 async function activeGame(store: GameStore): Promise<{ code: string; first: Player; second: Player; state: GameState }> {
   const first = player();
@@ -112,7 +113,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(errorCode(await store.command(code, first, fire(first, { row: 0, column: 0 }))), "COORDINATE_ALREADY_ATTACKED");
     });
 
-    it("a full game finishes once, frees both players and queues one archive job", async () => {
+    it("a full game finishes once and frees both players", async () => {
       const { code, first, second } = await activeGame(store);
       let last: CommandResult | undefined;
       for (const [index, target] of FLEET_CELLS.entries()) {
@@ -127,7 +128,12 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(errorCode(await store.command(code, second, fire(second, MISSES[20]))), "GAME_ALREADY_FINISHED");
       assert.deepEqual(await store.getPlayerState(first.id), { state: "NOT_PLAYING" });
       assert.deepEqual(await store.getPlayerState(second.id), { state: "NOT_PLAYING" });
+      ok(await store.create(first));
+    });
 
+    it("a finished game queues exactly one archive job", async () => {
+      const { code, second } = await activeGame(store);
+      const finished = ok(await store.command(code, second, surrender(second))).state;
       const archived: GameState[] = [];
       const result = await backend.outbox.processNext(async (snapshot) => { archived.push(snapshot); });
       assert.equal(result.kind, "archived");
@@ -139,7 +145,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
 
     it("a failed archive write is retried later instead of being lost", async () => {
       const { code, second } = await activeGame(store);
-      ok(await store.command(code, second, (_state, occurredAt) => ({ type: "SURRENDER", actor: second, occurredAt })));
+      ok(await store.command(code, second, surrender(second)));
       const failed = await backend.outbox.processNext(async () => { throw new Error("archive unavailable"); });
       assert.equal(failed.kind, "failed");
       assert.ok(failed.kind === "failed" && failed.retryInMs > 0);

@@ -29,11 +29,8 @@ defineStoreContract("etcd", {
     admin.close();
   },
   pending: [
-    "a player can be in only one active game",
-    "commands are validated against the stored state",
-    "a full game finishes once, frees both players and queues one archive job",
+    "a finished game queues exactly one archive job",
     "a failed archive write is retried later instead of being lost",
-    "cancelling a game in placement frees both players",
     "concurrent attacks on one turn commit exactly one move",
     "matchmaking pairs two searching players into one game",
     "cancelling matchmaking leaves the queue",
