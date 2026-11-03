@@ -1,6 +1,14 @@
-import type { Coordinate, GameErrorCode, PlayerStateResponse, ShipPlacement } from "@battleship/game-contract";
+import type { Coordinate, GameErrorCode, PlayerGameView, PlayerStateResponse, ShipPlacement } from "@battleship/game-contract";
 import { Router, type Request, type Response } from "express";
-import { domainError, type DomainError, type GameState, type Player, type Result } from "../game/index.js";
+import {
+  attackOutcome,
+  domainError,
+  playerView,
+  type DomainError,
+  type GameState,
+  type Player,
+  type Result
+} from "../game/index.js";
 import { GameRepository } from "../database/game-repository.js";
 import { GameUpdateBus } from "../database/update-bus.js";
 import type { MatchArchive } from "../archive/index.js";
@@ -56,8 +64,12 @@ function fleet(value: unknown): ShipPlacement[] | null {
   return parsed;
 }
 
+async function viewFor(repository: GameRepository, state: GameState, viewerId: string): Promise<Result<PlayerGameView>> {
+  return playerView(state, viewerId, await repository.presence(state.gameId, state));
+}
+
 async function sendGame(response: Response, repository: GameRepository, state: GameState, viewerId: string, status = 200): Promise<void> {
-  const view = await repository.view(state, viewerId);
+  const view = await viewFor(repository, state, viewerId);
   if (!view.ok) return sendError(response, view.error);
   response.status(status).json({ game: view.value });
 }
@@ -69,7 +81,7 @@ async function readParticipantGame(
 ): Promise<Result<{ state: GameState }>> {
   const state = await repository.getState(code);
   if (!state.ok) return state;
-  const view = await repository.view(state.value, playerId);
+  const view = await viewFor(repository, state.value, playerId);
   if (!view.ok) return view;
   return { ok: true, value: { state: state.value } };
 }
@@ -162,9 +174,9 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
     const player = actor(request);
     const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "FIRE", actor: player, coordinate: shot, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
-    const view = await repository.view(result.value.state, player.id);
+    const view = await viewFor(repository, result.value.state, player.id);
     if (!view.ok) return sendError(response, view.error);
-    const outcome = repository.attackOutcome(result.value.outcome);
+    const outcome = attackOutcome(result.value.outcome);
     if (!outcome) return sendError(response, domainError("INTERNAL_ERROR"));
     response.json({ game: view.value, outcome });
   });
@@ -235,7 +247,7 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
     if (!initial.ok) return sendError(response, initial.error);
     await repository.touchPresence(initial.value.state.gameId, request.user!.id);
     if (initial.value.state.version > afterVersion) {
-      const view = await repository.view(initial.value.state, request.user!.id);
+      const view = await viewFor(repository, initial.value.state, request.user!.id);
       if (!view.ok) return sendError(response, view.error);
       return response.json({ type: "GAME_UPDATED", game: view.value });
     }
@@ -267,7 +279,7 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
 
     const latest = await readParticipantGame(repository, code, request.user!.id);
     if (!latest.ok) return sendError(response, latest.error);
-    const view = await repository.view(latest.value.state, request.user!.id);
+    const view = await viewFor(repository, latest.value.state, request.user!.id);
     if (!view.ok) return sendError(response, view.error);
     if (latest.value.state.version > afterVersion) {
       return response.json({ type: "GAME_UPDATED", game: view.value });

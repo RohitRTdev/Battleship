@@ -1,18 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import type {
-  AttackView,
-  ConnectionStatus,
-  GameStatus,
-  PlayerGameView,
-  PlayerStateResponse
-} from "@battleship/game-contract";
+import type { ConnectionStatus, GameStatus, PlayerStateResponse } from "@battleship/game-contract";
 import type { Pool, PoolClient } from "pg";
 import {
   applyGameCommand,
   createGame,
   domainError,
   eventCommand,
-  projectGame,
   replayCommands,
   type CommandOutcome,
   type DomainError,
@@ -443,20 +436,5 @@ export class GameRepository {
     if (state.playerTwo) presence[state.playerTwo.id] = "UNKNOWN";
     for (const row of result.rows) presence[row.player_id] = row.connection_status;
     return presence;
-  }
-
-  async view(state: GameState, viewerId: string): Promise<Result<PlayerGameView>> {
-    const view = projectGame(state, viewerId, await this.presence(state.gameId, state));
-    return view ? { ok: true, value: view } : failed(domainError("PLAYER_NOT_IN_GAME"));
-  }
-
-  attackOutcome(outcome: CommandOutcome): AttackView | null {
-    if (!["MISS", "HIT", "SUNK", "WIN"].includes(outcome.type)) return null;
-    const attack = outcome as Extract<CommandOutcome, { coordinate: unknown }>;
-    return {
-      coordinate: attack.coordinate,
-      result: attack.type,
-      ...(attack.sunkShipLength ? { sunkShipLength: attack.sunkShipLength } : {})
-    };
   }
 }

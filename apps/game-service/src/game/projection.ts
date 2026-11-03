@@ -1,6 +1,7 @@
 import type { AttackView, ConnectionStatus, PlayerGameView, PlayerSummary, ShipView } from "@battleship/game-contract";
+import { failure, success } from "./errors.js";
 import { coordinatesEqual } from "./rules.js";
-import type { Fleet, GameState } from "./types.js";
+import type { CommandOutcome, Fleet, GameState, Result } from "./types.js";
 
 export type PresenceByPlayer = Record<string, ConnectionStatus>;
 
@@ -58,5 +59,20 @@ export function projectGame(state: GameState, viewerId: string, presence: Presen
     opponentAttacks: attackViews(state, viewerIsOne ? state.playerTwo?.id ?? "" : state.playerOne.id),
     winnerPlayerId: state.winnerPlayerId,
     completionReason: state.completionReason
+  };
+}
+
+export function playerView(state: GameState, viewerId: string, presence: PresenceByPlayer): Result<PlayerGameView> {
+  const view = projectGame(state, viewerId, presence);
+  return view ? success(view) : failure("PLAYER_NOT_IN_GAME");
+}
+
+export function attackOutcome(outcome: CommandOutcome): AttackView | null {
+  if (!["MISS", "HIT", "SUNK", "WIN"].includes(outcome.type)) return null;
+  const attack = outcome as Extract<CommandOutcome, { coordinate: unknown }>;
+  return {
+    coordinate: attack.coordinate,
+    result: attack.type,
+    ...(attack.sunkShipLength ? { sunkShipLength: attack.sunkShipLength } : {})
   };
 }
