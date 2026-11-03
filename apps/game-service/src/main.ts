@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { runMigrations } from "./store/postgres/migrations.js";
 import { GameRepository } from "./store/postgres/game-repository.js";
 import { GameUpdateBus } from "./store/postgres/update-bus.js";
+import { PostgresArchiveOutbox } from "./store/postgres/archive-outbox.js";
 import { createGameRouter } from "./http/game-router.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
@@ -54,7 +55,7 @@ async function expireTurns(): Promise<void> {
 let timeoutTimer: NodeJS.Timeout | null = null;
 const updates = new GameUpdateBus(database);
 const archive = createMatchArchive();
-const archiveWorker = new ArchiveWorker(database, archive, updates);
+const archiveWorker = new ArchiveWorker(new PostgresArchiveOutbox(database, updates), archive);
 
 async function initializeDatabase(): Promise<void> {
   while (true) {
