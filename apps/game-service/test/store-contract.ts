@@ -173,6 +173,20 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(after.attacks.length, 1);
     });
 
+    it("concurrent joins let exactly one player in", async () => {
+      const creator = player();
+      const code = ok(await store.create(creator)).state.gameCode;
+      const joiners = Array.from({ length: 5 }, player);
+      const results = await Promise.all(joiners.map((joiner) => store.command(code, joiner, join(joiner))));
+      assert.equal(results.filter((result) => result.ok).length, 1);
+      assert.deepEqual(results.filter((result) => !result.ok).map(errorCode), ["GAME_FULL", "GAME_FULL", "GAME_FULL", "GAME_FULL"]);
+      const winner = joiners[results.findIndex((result) => result.ok)];
+      assert.equal(ok(await store.getState(code)).playerTwo?.id, winner.id);
+      for (const [index, joiner] of joiners.entries()) {
+        if (!results[index].ok) assert.deepEqual(await store.getPlayerState(joiner.id), { state: "NOT_PLAYING" });
+      }
+    });
+
     it("matchmaking pairs two searching players into one game", async () => {
       const first = player();
       const second = player();
