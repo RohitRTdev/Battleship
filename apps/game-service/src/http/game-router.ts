@@ -9,8 +9,7 @@ import {
   type Player,
   type Result
 } from "../game/index.js";
-import { GameRepository } from "../database/game-repository.js";
-import { GameUpdateBus } from "../database/update-bus.js";
+import type { GameStore, UpdateBus } from "../store/game-store.js";
 import type { MatchArchive } from "../archive/index.js";
 
 const GAME_CODE_PATTERN = /^[0-9A-HJKMNP-TV-Z]{8}$/;
@@ -64,18 +63,18 @@ function fleet(value: unknown): ShipPlacement[] | null {
   return parsed;
 }
 
-async function viewFor(repository: GameRepository, state: GameState, viewerId: string): Promise<Result<PlayerGameView>> {
+async function viewFor(repository: GameStore, state: GameState, viewerId: string): Promise<Result<PlayerGameView>> {
   return playerView(state, viewerId, await repository.presence(state.gameId, state));
 }
 
-async function sendGame(response: Response, repository: GameRepository, state: GameState, viewerId: string, status = 200): Promise<void> {
+async function sendGame(response: Response, repository: GameStore, state: GameState, viewerId: string, status = 200): Promise<void> {
   const view = await viewFor(repository, state, viewerId);
   if (!view.ok) return sendError(response, view.error);
   response.status(status).json({ game: view.value });
 }
 
 async function readParticipantGame(
-  repository: GameRepository,
+  repository: GameStore,
   code: string,
   playerId: string
 ): Promise<Result<{ state: GameState }>> {
@@ -86,7 +85,7 @@ async function readParticipantGame(
   return { ok: true, value: { state: state.value } };
 }
 
-export function createGameRouter(repository: GameRepository, updates: GameUpdateBus, archive: MatchArchive): Router {
+export function createGameRouter(repository: GameStore, updates: UpdateBus, archive: MatchArchive): Router {
   const router = Router();
 
   const matchmakingUpdate = (response: Response, state: PlayerStateResponse): void => {

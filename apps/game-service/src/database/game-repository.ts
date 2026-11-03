@@ -1,13 +1,13 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { ConnectionStatus, GameStatus, PlayerStateResponse } from "@battleship/game-contract";
 import type { Pool, PoolClient } from "pg";
+import type { CommandResult, GameStore } from "../store/game-store.js";
 import {
   applyGameCommand,
   createGame,
   domainError,
   eventCommand,
   replayCommands,
-  type CommandOutcome,
   type DomainError,
   type GameCommand,
   type GameState,
@@ -32,8 +32,6 @@ type PlayerStateRow = {
 
 const MATCHMAKING_LOCK_KEY = "1947452302";
 const PLAYER_LOCK_NAMESPACE = "1947452303";
-
-export type CommandResult = { state: GameState; outcome: CommandOutcome };
 
 function generateGameCode(): string {
   return [...randomBytes(8)].map((byte) => CODE_ALPHABET[byte % CODE_ALPHABET.length]).join("");
@@ -146,7 +144,7 @@ function failed<T>(error: DomainError): Result<T> {
   return { ok: false, error };
 }
 
-export class GameRepository {
+export class GameRepository implements GameStore {
   constructor(private readonly pool: Pool) {}
 
   async create(actor: Player): Promise<Result<CommandResult>> {

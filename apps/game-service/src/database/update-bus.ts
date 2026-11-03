@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
 import type { Pool, PoolClient } from "pg";
+import type { UpdateBus } from "../store/game-store.js";
 
 type UpdatePayload = { gameId: string; version: number };
 type PlayerUpdatePayload = { playerId: string };
 type ArchiveUpdatePayload = { gameId: string };
 
-export class GameUpdateBus {
+export class GameUpdateBus implements UpdateBus {
   private readonly events = new EventEmitter();
   private listener: PoolClient | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
