@@ -10,6 +10,8 @@ export const keys = {
   playerPrefix: "players/",
   queueEntry: (playerId: string) => `matchmaking/queue/${playerId}`,
   queuePrefix: "matchmaking/queue/",
+  /** Rewritten by every enqueue, so two players can't both join an empty queue without seeing each other. */
+  queueEpoch: "matchmaking/epoch",
   presence: (gameId: string, playerId: string) => `presence/${gameId}/${playerId}`,
   presencePrefix: (gameId: string) => `presence/${gameId}/`,
   archiveJob: (gameId: string) => `archive/jobs/${gameId}`,

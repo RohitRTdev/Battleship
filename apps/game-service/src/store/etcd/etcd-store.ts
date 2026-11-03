@@ -25,6 +25,7 @@ export type QueueEntry = { username: string; enqueuedAt: string };
 
 const CODE_ATTEMPTS = 8;
 const COMMAND_ATTEMPTS = 50;
+const MATCHMAKING_ATTEMPTS = 50;
 
 /** Short random wait before retrying a conflicting write, so racing requests spread out. */
 function backoff(attempt: number): Promise<void> {
@@ -171,12 +172,80 @@ export class EtcdStore implements GameStore {
     return { state: decode<GameState>(game.value), modRevision: game.mod_revision };
   }
 
-  async startMatchmaking(_actor: Player): Promise<Result<PlayerStateResponse>> {
-    return notImplemented("startMatchmaking");
+  async startMatchmaking(actor: Player): Promise<Result<PlayerStateResponse>> {
+    for (let attempt = 0; attempt < MATCHMAKING_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await backoff(attempt);
+      const current = await this.getPlayerState(actor.id);
+      if (current.state === "PLAYING") return failed("PLAYER_ALREADY_PLAYING");
+      if (current.state === "SEARCHING") return failed("PLAYER_ALREADY_SEARCHING");
+
+      // Read the epoch and the head of the queue from one snapshot.
+      const epoch = await this.kv.get(keys.queueEpoch).exec();
+      const epochRevision = firstKv(epoch)?.mod_revision ?? "0";
+      const [head] = (await this.kv.getAll().prefix(keys.queuePrefix).sort("Create", "Ascend").limit(1)
+        .revision(epoch.header.revision).exec()).kvs;
+
+      if (!head) {
+        const entry: QueueEntry = { username: actor.username, enqueuedAt: await this.currentTime() };
+        const queued = await this.kv
+          .if(keys.queueEpoch, "Mod", "==", epochRevision)
+          .and(keys.activeGame(actor.id), "Create", "==", 0)
+          .and(keys.queueEntry(actor.id), "Create", "==", 0)
+          .then(this.kv.put(keys.queueEpoch).value(""), this.kv.put(keys.queueEntry(actor.id)).value(encode(entry)))
+          .commit();
+        if (queued.succeeded) return { ok: true, value: { state: "SEARCHING", searchStartedAt: entry.enqueuedAt } };
+        continue;
+      }
+
+      const rawKey = head.key.toString();
+      const opponent: Player = {
+        id: rawKey.slice(rawKey.indexOf(keys.queuePrefix) + keys.queuePrefix.length),
+        username: decode<QueueEntry>(head.value).username
+      };
+      const now = await this.currentTime();
+      const created = createGame({
+        type: "CREATE_GAME",
+        gameId: randomUUID(),
+        gameCode: generateGameCode(),
+        turnTimeoutEnabled: this.timeoutEnabled,
+        actor: opponent,
+        occurredAt: now
+      });
+      if (!created.ok) throw new Error(created.error.code);
+      const joined = applyGameCommand(created.value.state, { type: "JOIN_GAME", actor, occurredAt: now });
+      if (!joined.ok) throw new Error(joined.error.code);
+      const state = joined.value.state;
+      const active: ActiveGame = { gameId: state.gameId, gameCode: state.gameCode };
+
+      // Commit only if the opponent is still waiting and neither player has entered a game meanwhile.
+      const matched = await this.kv
+        .if(keys.queueEntry(opponent.id), "Mod", "==", head.mod_revision)
+        .and(keys.activeGame(opponent.id), "Create", "==", 0)
+        .and(keys.activeGame(actor.id), "Create", "==", 0)
+        .and(keys.queueEntry(actor.id), "Create", "==", 0)
+        .and(keys.code(state.gameCode), "Create", "==", 0)
+        .then(
+          ...this.transitionWrites(created.value.state, state),
+          this.kv.put(keys.code(state.gameCode)).value(state.gameId),
+          this.kv.put(keys.activeGame(opponent.id)).value(encode(active)),
+          this.kv.put(keys.activeGame(actor.id)).value(encode(active)),
+          this.kv.delete().key(keys.queueEntry(opponent.id))
+        )
+        .else(this.kv.get(keys.activeGame(opponent.id)))
+        .commit();
+      if (matched.succeeded) return { ok: true, value: { state: "PLAYING", gameCode: state.gameCode, gameStatus: state.status } };
+      if (firstKv(matched.responses[0]?.response_range)) {
+        // A queued player who is already in a game would block the queue head forever; drop the stale entry.
+        await this.kv.if(keys.queueEntry(opponent.id), "Mod", "==", head.mod_revision)
+          .then(this.kv.delete().key(keys.queueEntry(opponent.id))).commit();
+      }
+    }
+    throw new Error("etcd store: too many conflicting matchmaking attempts");
   }
 
-  async cancelMatchmaking(_playerId: string): Promise<PlayerStateResponse> {
-    return notImplemented("cancelMatchmaking");
+  async cancelMatchmaking(playerId: string): Promise<PlayerStateResponse> {
+    const removed = await this.kv.delete().key(keys.queueEntry(playerId)).exec();
+    return Number(removed.deleted) > 0 ? { state: "NOT_PLAYING" } : this.getPlayerState(playerId);
   }
 
   async touchPresence(_gameId: string, _playerId: string): Promise<void> {
