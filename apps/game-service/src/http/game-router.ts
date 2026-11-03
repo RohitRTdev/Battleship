@@ -88,6 +88,11 @@ async function readParticipantGame(
 export function createGameRouter(repository: GameStore, updates: UpdateBus, archive: MatchArchive): Router {
   const router = Router();
 
+  router.get("/time", async (_request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    response.json({ serverNow: await repository.currentTime() });
+  });
+
   const matchmakingUpdate = (response: Response, state: PlayerStateResponse): void => {
     if (state.state === "PLAYING") {
       response.json({ type: "MATCH_FOUND", gameCode: state.gameCode, gameStatus: state.gameStatus });
@@ -252,8 +257,9 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
     }
 
     let closed = false;
+    let notified = false;
     let wake: ((reason: "update" | "timeout" | "closed") => void) | null = null;
-    const onUpdate = () => wake?.("update");
+    const onUpdate = () => { notified = true; wake?.("update"); };
     const onClose = () => { closed = true; wake?.("closed"); };
     updates.on(initial.value.state.gameId, onUpdate);
     response.on("close", onClose);
@@ -264,7 +270,7 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
       return sendError(response, secondRead.error);
     }
     let reason: "update" | "timeout" | "closed" = "update";
-    if (secondRead.value.state.version <= afterVersion && !closed) {
+    if (secondRead.value.state.version <= afterVersion && !closed && !notified) {
       reason = await new Promise((resolve) => {
         wake = resolve;
         const timer = setTimeout(() => resolve("timeout"), 3_000);

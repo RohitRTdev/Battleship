@@ -28,6 +28,9 @@ export type GameState = {
   playerTwoFleet: Fleet | null;
   attacks: Attack[];
   currentTurn: string | null;
+  turnDeadlineAt: string | null;
+  placementDeadlineAt: string | null;
+  turnTimeoutEnabled: boolean;
   winnerPlayerId: string | null;
   completionReason: CompletionReason | null;
   createdAt: string;
@@ -39,6 +42,7 @@ export type CreateGameCommand = {
   type: "CREATE_GAME";
   gameId: string;
   gameCode: string;
+  turnTimeoutEnabled?: boolean;
   actor: Player;
   occurredAt: string;
 };
@@ -48,7 +52,9 @@ export type GameCommand =
   | { type: "PLACE_FLEET"; actor: Player; ships: ShipPlacement[]; occurredAt: string }
   | { type: "FIRE"; actor: Player; coordinate: Coordinate; occurredAt: string }
   | { type: "CANCEL_GAME"; actor: Player; occurredAt: string }
-  | { type: "SURRENDER"; actor: Player; occurredAt: string };
+  | { type: "SURRENDER"; actor: Player; occurredAt: string }
+  | { type: "TURN_TIMEOUT"; actor: Player; deadline: string; occurredAt: string }
+  | { type: "PLACEMENT_TIMEOUT"; actor: Player; deadline: string; occurredAt: string };
 
 export type PersistedCommand = CreateGameCommand | GameCommand;
 export type GameEvent = { type: PersistedCommand["type"]; command: PersistedCommand };
@@ -59,6 +65,7 @@ export type CommandOutcome =
   | { type: "FLEET_ACCEPTED" }
   | { type: "GAME_CANCELLED" }
   | { type: "GAME_SURRENDERED" }
+  | { type: "GAME_TIMED_OUT" }
   | {
       type: AttackResult;
       coordinate: Coordinate;

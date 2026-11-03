@@ -14,6 +14,11 @@ import type {
   Transition
 } from "./types.js";
 
+const TURN_MS = 30_000;
+const PLACEMENT_MS = 60_000;
+const GRACE_MS = 500;
+function deadline(time: string): string { return new Date(Date.parse(time) + TURN_MS).toISOString(); }
+
 function participant(state: GameState, playerId: string): Player | null {
   if (state.playerOne.id === playerId) return state.playerOne;
   if (state.playerTwo?.id === playerId) return state.playerTwo;
@@ -52,6 +57,9 @@ export function createGame(command: CreateGameCommand): Result<Transition> {
     playerTwoFleet: null,
     attacks: [],
     currentTurn: null,
+    turnDeadlineAt: null,
+    placementDeadlineAt: null,
+    turnTimeoutEnabled: command.turnTimeoutEnabled ?? false,
     winnerPlayerId: null,
     completionReason: null,
     createdAt: command.occurredAt,
@@ -70,7 +78,7 @@ export function applyGameCommand(state: GameState, command: GameCommand): Result
       }
       if (state.status === "ACTIVE") return failure("GAME_ALREADY_STARTED");
       if (state.status !== "WAITING" || state.playerTwo) return failure("GAME_FULL");
-      const next = { ...state, status: "PLACEMENT" as const, playerTwo: command.actor };
+      const next = { ...state, status: "PLACEMENT" as const, playerTwo: command.actor, placementDeadlineAt: state.turnTimeoutEnabled ? new Date(Date.parse(command.occurredAt) + PLACEMENT_MS).toISOString() : null };
       return transition(next, command, { type: "GAME_JOINED" });
     }
     case "PLACE_FLEET": {
@@ -90,8 +98,10 @@ export function applyGameCommand(state: GameState, command: GameCommand): Result
       };
       if (next.playerOneFleet && next.playerTwoFleet) {
         next.status = "ACTIVE";
+        next.placementDeadlineAt = null;
         next.currentTurn = next.playerOne.id;
         next.startedAt = command.occurredAt;
+        next.turnDeadlineAt = next.turnTimeoutEnabled ? deadline(command.occurredAt) : null;
       }
       return transition(next, command, { type: "FLEET_ACCEPTED" });
     }
@@ -124,6 +134,7 @@ export function applyGameCommand(state: GameState, command: GameCommand): Result
         ...state,
         attacks: [...state.attacks, attack],
         currentTurn: won ? null : target.id,
+        turnDeadlineAt: won || !state.turnTimeoutEnabled ? null : deadline(command.occurredAt),
         status: won ? "FINISHED" : state.status,
         winnerPlayerId: won ? command.actor.id : null,
         completionReason: won ? "FLEET_DESTROYED" : null,
@@ -135,6 +146,16 @@ export function applyGameCommand(state: GameState, command: GameCommand): Result
         ...(attack.sunkShipLength ? { sunkShipLength: attack.sunkShipLength } : {})
       });
     }
+    case "TURN_TIMEOUT": {
+      if (state.status !== "ACTIVE" || !state.turnDeadlineAt || state.turnDeadlineAt !== command.deadline || state.currentTurn !== command.actor.id || Date.parse(command.occurredAt) < Date.parse(command.deadline) + GRACE_MS) return failure("GAME_NOT_ACTIVE");
+      const winner = opponent(state, command.actor.id);
+      if (!winner) return failure("GAME_NOT_ACTIVE");
+      return transition({ ...state, status: "FINISHED", currentTurn: null, turnDeadlineAt: null, winnerPlayerId: winner.id, completionReason: "TIMEOUT", endedAt: command.occurredAt }, command, { type: "GAME_TIMED_OUT" });
+    }
+    case "PLACEMENT_TIMEOUT": {
+      if (state.status !== "PLACEMENT" || !state.placementDeadlineAt || state.placementDeadlineAt !== command.deadline || (state.playerOneFleet && state.playerTwoFleet) || Date.parse(command.occurredAt) < Date.parse(command.deadline) + GRACE_MS) return failure("GAME_NOT_IN_PLACEMENT");
+      return transition({ ...state, status: "FINISHED", placementDeadlineAt: null, winnerPlayerId: null, completionReason: "CANCELLED", endedAt: command.occurredAt }, command, { type: "GAME_CANCELLED" });
+    }
     case "CANCEL_GAME": {
       if (!participant(state, command.actor.id)) return failure("PLAYER_NOT_IN_GAME");
       if (state.status === "FINISHED") {
@@ -144,6 +165,7 @@ export function applyGameCommand(state: GameState, command: GameCommand): Result
       const next: GameState = {
         ...state,
         status: "FINISHED",
+        placementDeadlineAt: null,
         winnerPlayerId: null,
         completionReason: "CANCELLED",
         endedAt: command.occurredAt
@@ -159,6 +181,7 @@ export function applyGameCommand(state: GameState, command: GameCommand): Result
         ...state,
         status: "FINISHED",
         currentTurn: null,
+        turnDeadlineAt: null,
         winnerPlayerId: winner.id,
         completionReason: "SURRENDER",
         endedAt: command.occurredAt

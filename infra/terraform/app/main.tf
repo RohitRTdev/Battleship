@@ -239,7 +239,7 @@ resource "aws_ecs_task_definition" "backend" {
     name         = "backend", image = var.backend_image, essential = true,
     portMappings = [{ containerPort = 8080, protocol = "tcp" }, { containerPort = 9090, protocol = "tcp" }],
     environment = [
-      { name = "APP_ENV", value = "prod" }, { name = "HTTP_PORT", value = "8080" }, { name = "GRPC_PORT", value = "9090" },
+      { name = "APP_ENV", value = "prod" }, { name = "DISABLE_TIMEOUT", value = tostring(var.disable_timeout) }, { name = "HTTP_PORT", value = "8080" }, { name = "GRPC_PORT", value = "9090" },
       { name = "AWS_REGION", value = var.aws_region }, { name = "COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.main.id },
       { name = "COGNITO_APP_CLIENT_ID", value = aws_cognito_user_pool_client.web.id }, { name = "PGHOST", value = aws_db_instance.main.address },
       { name = "PGPORT", value = tostring(aws_db_instance.main.port) }, { name = "PGDATABASE", value = "battleship" }, { name = "PGUSER", value = "battleship" },

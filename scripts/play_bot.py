@@ -312,6 +312,10 @@ def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) ->
                 }
                 if status in messages:
                     print(messages[status], flush=True)
+                if status == "PLACEMENT" and game.get("placementDeadlineAt"):
+                    print("Both players must submit their fleets before placement time expires.", flush=True)
+                elif status == "ACTIVE" and game.get("turnDeadlineAt"):
+                    print("Each move has a time limit; a player who times out loses.", flush=True)
                 announced_status = status
 
             if status == "WAITING":
@@ -320,11 +324,17 @@ def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) ->
 
             if status == "PLACEMENT":
                 if not bot_player(game).get("fleetSubmitted"):
-                    response = client.request(
-                        "PUT",
-                        f"/api/backend/games/{code}/fleet",
-                        {"ships": fleet},
-                    )
+                    try:
+                        response = client.request(
+                            "PUT",
+                            f"/api/backend/games/{code}/fleet",
+                            {"ships": fleet},
+                        )
+                    except ApiError as error:
+                        if error.code in {"GAME_CANCELLED", "GAME_ALREADY_FINISHED"}:
+                            game = client.request("GET", f"/api/backend/games/{code}")["game"]
+                            continue
+                        raise
                     game = response["game"]
                     print("Bot ships placed.", flush=True)
                 else:
@@ -357,7 +367,7 @@ def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) ->
                     {"coordinate": target},
                 )
             except ApiError as error:
-                if error.code in {"NOT_YOUR_TURN", "COORDINATE_ALREADY_ATTACKED"}:
+                if error.code in {"NOT_YOUR_TURN", "COORDINATE_ALREADY_ATTACKED", "TURN_TIMED_OUT", "GAME_ALREADY_FINISHED", "GAME_CANCELLED"}:
                     game = client.request("GET", f"/api/backend/games/{code}")["game"]
                     continue
                 raise
@@ -369,6 +379,11 @@ def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) ->
         reason = game.get("completionReason")
         if reason == "CANCELLED":
             print("Game cancelled.", flush=True)
+        elif reason == "TIMEOUT":
+            if won:
+                print("Bot won: you ran out of time.", flush=True)
+            else:
+                print("You won: the bot ran out of time.", flush=True)
         elif won:
             print("Bot won the game.", flush=True)
         else:

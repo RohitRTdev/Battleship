@@ -22,6 +22,7 @@ const messages: Record<GameErrorCode, string> = {
   SHIPS_OVERLAP: "Ships cannot overlap.",
   SHIPS_ADJACENT: "Ships cannot touch, including diagonally.",
   INVALID_COORDINATE: "The coordinate must be on the 10 by 10 board.",
+  TURN_TIMED_OUT: "The turn timed out. Refresh the game to see the result.",
   NOT_YOUR_TURN: "It is the other player's turn.",
   COORDINATE_ALREADY_ATTACKED: "That coordinate has already been attacked.",
   DATABASE_UNAVAILABLE: "The game database is unavailable.",

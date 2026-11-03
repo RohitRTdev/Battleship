@@ -5,6 +5,8 @@ export type CommandResult = { state: GameState; outcome: CommandOutcome };
 
 /** Durable storage for games, matchmaking and presence. */
 export interface GameStore {
+  /** The store's authoritative clock, used for turn deadlines. */
+  currentTime(): Promise<string>;
   create(actor: Player): Promise<Result<CommandResult>>;
   /**
    * Applies a command to the game with the given code atomically. `buildCommand` receives the current
