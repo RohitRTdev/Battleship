@@ -6,8 +6,8 @@ import type { CommandResult, GameStore, StoreBackend } from "../src/store/index.
 
 /** Store-specific setup for the contract suite. */
 export type StoreHarness = {
-  /** Creates a started backend. Turn timeouts are disabled so tests are not time-dependent. */
-  open(): Promise<StoreBackend>;
+  /** Creates a started backend. Turn timeouts are off unless a test asks for them. */
+  open(options?: { timeoutEnabled?: boolean }): Promise<StoreBackend>;
   /** Deletes all game, matchmaking, presence and archive data. */
   reset(): Promise<void>;
   /** Called once after all tests, after the backend is closed. */
@@ -47,6 +47,9 @@ const join = (actor: Player): Build => (_state, occurredAt) => ({ type: "JOIN_GA
 const place = (actor: Player): Build => (_state, occurredAt) => ({ type: "PLACE_FLEET", actor, ships: FLEET, occurredAt });
 const fire = (actor: Player, coordinate: Coordinate): Build => (_state, occurredAt) => ({ type: "FIRE", actor, coordinate, occurredAt });
 const cancel = (actor: Player): Build => (_state, occurredAt) => ({ type: "CANCEL_GAME", actor, occurredAt });
+/** Places the fleet as if 40 s ago, so the turn deadline it starts (30 s) has already passed. */
+const placeLongAgo = (actor: Player): Build => (_state, occurredAt) =>
+  ({ type: "PLACE_FLEET", actor, ships: FLEET, occurredAt: new Date(Date.parse(occurredAt) - 40_000).toISOString() });
 const surrender = (actor: Player): Build => (_state, occurredAt) => ({ type: "SURRENDER", actor, occurredAt });
 
 async function activeGame(store: GameStore): Promise<{ code: string; first: Player; second: Player; state: GameState }> {
@@ -252,6 +255,48 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       const presence = await store.presence(state.gameId, state);
       assert.equal(presence[first.id], "CONNECTED");
       assert.equal(presence[state.playerTwo!.id], "UNKNOWN");
+    });
+
+    async function overdueGame(timed: GameStore): Promise<{ code: string; first: Player; second: Player }> {
+      const first = player();
+      const second = player();
+      const code = ok(await timed.create(first)).state.gameCode;
+      ok(await timed.command(code, second, join(second)));
+      ok(await timed.command(code, first, place(first)));
+      const active = ok(await timed.command(code, second, placeLongAgo(second))).state;
+      assert.ok(Date.parse(active.turnDeadlineAt!) < Date.now(), "turn deadline should already have passed");
+      return { code, first, second };
+    }
+
+    it("an overdue turn times out exactly once", async () => {
+      const timed = await harness.open({ timeoutEnabled: true });
+      try {
+        const { code, first, second } = await overdueGame(timed.store);
+        assert.equal(await timed.store.expireOneTurn(), true);
+        const finished = ok(await timed.store.getState(code));
+        assert.equal(finished.completionReason, "TIMEOUT");
+        assert.equal(finished.winnerPlayerId, second.id);
+        assert.equal(await timed.store.expireOneTurn(), false);
+        assert.deepEqual(await timed.store.getPlayerState(first.id), { state: "NOT_PLAYING" });
+        assert.deepEqual(await timed.store.getPlayerState(second.id), { state: "NOT_PLAYING" });
+      } finally {
+        await timed.close();
+      }
+    });
+
+    it("a move after the turn deadline times the turn out instead", async () => {
+      const timed = await harness.open({ timeoutEnabled: true });
+      try {
+        const { code, first, second } = await overdueGame(timed.store);
+        assert.equal(errorCode(await timed.store.command(code, first, fire(first, { row: 0, column: 0 }))), "TURN_TIMED_OUT");
+        const finished = ok(await timed.store.getState(code));
+        assert.equal(finished.completionReason, "TIMEOUT");
+        assert.equal(finished.winnerPlayerId, second.id);
+        assert.equal(finished.attacks.length, 0);
+        assert.equal(await timed.store.expireOneTurn(), false);
+      } finally {
+        await timed.close();
+      }
     });
 
     it("expireOneTurn does nothing when no deadline has passed", async () => {

@@ -6,8 +6,10 @@ import {
   applyGameCommand,
   createGame,
   domainError,
+  dueTimeout,
   eventCommand,
   generateGameCode,
+  lateMoveTimeout,
   replayCommands,
   type DomainError,
   type GameCommand,
@@ -221,22 +223,13 @@ export class GameRepository implements GameStore {
       const state = await loadState(client, game.rows[0].id);
       const now = await databaseTime(client);
       const command = buildCommand(state, now);
-      if ((command.type === "FIRE" || command.type === "SURRENDER") && state.status === "ACTIVE" && state.turnDeadlineAt && (state.playerOne.id === actor.id || state.playerTwo?.id === actor.id) && Date.parse(now) >= Date.parse(state.turnDeadlineAt) + 500) {
-        const timedOut = state.currentTurn === state.playerOne.id ? state.playerOne : state.playerTwo!;
-        const timeoutCommand: GameCommand = { type: "TURN_TIMEOUT", actor: timedOut, deadline: state.turnDeadlineAt, occurredAt: now };
-        const timeout = applyGameCommand(state, timeoutCommand);
+      const late = lateMoveTimeout(state, command, now);
+      if (late) {
+        const timeout = applyGameCommand(state, late.timeout);
         if (!timeout.ok) throw new Error(timeout.error.code);
-        await this.persistTransition(client, timeout.value.state, timeoutCommand);
+        await this.persistTransition(client, timeout.value.state, late.timeout);
         await client.query("COMMIT");
-        return failed(domainError("TURN_TIMED_OUT"));
-      }
-      if (command.type === "PLACE_FLEET" && state.status === "PLACEMENT" && state.placementDeadlineAt && (state.playerOne.id === actor.id || state.playerTwo?.id === actor.id) && Date.parse(now) >= Date.parse(state.placementDeadlineAt) + 500) {
-        const timeoutCommand: GameCommand = { type: "PLACEMENT_TIMEOUT", actor: state.playerOne, deadline: state.placementDeadlineAt, occurredAt: now };
-        const timeout = applyGameCommand(state, timeoutCommand);
-        if (!timeout.ok) throw new Error(timeout.error.code);
-        await this.persistTransition(client, timeout.value.state, timeoutCommand);
-        await client.query("COMMIT");
-        return failed(domainError("GAME_CANCELLED"));
+        return failed(domainError(late.error));
       }
       const applied = applyGameCommand(state, command);
       if (!applied.ok) {
@@ -291,18 +284,11 @@ export class GameRepository implements GameStore {
       if (!rows.rows[0]) { await client.query("COMMIT"); return false; }
       const state = await loadState(client, rows.rows[0].id);
       const now = await databaseTime(client);
-      if (state.status === "ACTIVE" && state.turnDeadlineAt && state.currentTurn && Date.parse(now) >= Date.parse(state.turnDeadlineAt) + 500) {
-        const actor = state.currentTurn === state.playerOne.id ? state.playerOne : state.playerTwo!;
-        const command: GameCommand = { type: "TURN_TIMEOUT", actor, deadline: state.turnDeadlineAt, occurredAt: now };
-        const result = applyGameCommand(state, command);
+      const timeout = dueTimeout(state, now);
+      if (timeout) {
+        const result = applyGameCommand(state, timeout);
         if (!result.ok) throw new Error(result.error.code);
-        await this.persistTransition(client, result.value.state, command);
-      }
-      else if (state.status === "PLACEMENT" && state.placementDeadlineAt && Date.parse(now) >= Date.parse(state.placementDeadlineAt) + 500) {
-        const command: GameCommand = { type: "PLACEMENT_TIMEOUT", actor: state.playerOne, deadline: state.placementDeadlineAt, occurredAt: now };
-        const result = applyGameCommand(state, command);
-        if (!result.ok) throw new Error(result.error.code);
-        await this.persistTransition(client, result.value.state, command);
+        await this.persistTransition(client, result.value.state, timeout);
       }
       await client.query("COMMIT");
       return true;

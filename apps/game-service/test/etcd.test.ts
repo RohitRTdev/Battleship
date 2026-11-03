@@ -11,14 +11,14 @@ if (!endpoints) throw new Error("TEST_ETCD_ENDPOINTS is required; run the tests 
 
 const admin = new Etcd3({ hosts: endpoints.split(",") });
 
-function backendFor(hosts: string): StoreBackend {
+function backendFor(hosts: string, timeoutEnabled = false): StoreBackend {
   process.env.ETCD_ENDPOINTS = hosts;
-  return createEtcdBackend({ timeoutEnabled: false });
+  return createEtcdBackend({ timeoutEnabled });
 }
 
 defineStoreContract("etcd", {
-  async open() {
-    const backend = backendFor(endpoints);
+  async open(options) {
+    const backend = backendFor(endpoints, options?.timeoutEnabled ?? false);
     await backend.start();
     return backend;
   },
@@ -35,8 +35,7 @@ defineStoreContract("etcd", {
     "cancelling matchmaking leaves the queue",
     "simultaneous matchmaking requests pair every player exactly once",
     "updates wake listeners for the changed game",
-    "presence reports recently seen players as connected",
-    "expireOneTurn does nothing when no deadline has passed"
+    "presence reports recently seen players as connected"
   ]
 });
 

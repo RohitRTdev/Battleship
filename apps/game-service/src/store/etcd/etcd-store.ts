@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { ConnectionStatus, PlayerStateResponse } from "@battleship/game-contract";
-import type { IKeyValue, IRangeResponse, Namespace } from "etcd3";
+import type { IKeyValue, IOperation, IRangeResponse, Namespace } from "etcd3";
 import {
   applyGameCommand,
   createGame,
   domainError,
+  dueTimeout,
   generateGameCode,
+  lateMoveTimeout,
+  TIMEOUT_GRACE_MS,
   type GameCommand,
   type GameState,
   type Player,
@@ -100,30 +103,35 @@ export class EtcdStore implements GameStore {
       const game = await this.readGame(gameCode);
       if (!game) return failed("GAME_NOT_FOUND");
 
-      const command = buildCommand(game.state, await this.currentTime());
+      const now = await this.currentTime();
+      const requested = buildCommand(game.state, now);
+      const late = lateMoveTimeout(game.state, requested, now);
+      const command = late?.timeout ?? requested;
       const applied = applyGameCommand(game.state, command);
-      if (!applied.ok) return applied;
+      if (!applied.ok) {
+        if (late) throw new Error(applied.error.code);
+        return applied;
+      }
       const next = applied.value.state;
 
       // Commit only if nobody changed the game (or started this player searching) since we read it.
       let transaction = this.kv
         .if(keys.game(next.gameId), "Mod", "==", game.modRevision)
         .and(keys.queueEntry(actor.id), "Create", "==", 0);
-      const writes = [this.kv.put(keys.game(next.gameId)).value(encode(next))];
+      const writes = this.transitionWrites(game.state, next);
       if (command.type === "JOIN_GAME") {
         transaction = transaction.and(keys.activeGame(actor.id), "Create", "==", 0);
         const active: ActiveGame = { gameId: next.gameId, gameCode: next.gameCode };
         writes.push(this.kv.put(keys.activeGame(actor.id)).value(encode(active)));
       }
-      const deletes = next.status === "FINISHED"
-        ? [next.playerOne, next.playerTwo].filter((player) => player !== null).map((player) => this.kv.delete().key(keys.activeGame(player.id)))
-        : [];
 
       const result = await transaction
-        .then(...writes, ...deletes)
+        .then(...writes)
         .else(this.kv.get(keys.queueEntry(actor.id)), this.kv.get(keys.activeGame(actor.id)))
         .commit();
-      if (result.succeeded) return { ok: true, value: { state: next, outcome: applied.value.outcome } };
+      if (result.succeeded) {
+        return late ? failed(late.error) : { ok: true, value: { state: next, outcome: applied.value.outcome } };
+      }
 
       const [searching, playing] = result.responses.map((response) => firstKv(response.response_range));
       if (searching) return failed("PLAYER_ALREADY_SEARCHING");
@@ -179,11 +187,52 @@ export class EtcdStore implements GameStore {
     return notImplemented("presence");
   }
 
-  /** No game can have a deadline until create is implemented, so nothing is ever due yet. */
   async expireOneTurn(): Promise<boolean> {
-    void this.kv;
-    void this.timeoutEnabled;
-    return false;
+    const now = await this.currentTime();
+    // Index keys sort by deadline, so the first one is the most overdue.
+    const [entry] = (await this.kv.getAll().prefix(keys.deadlinePrefix).sort("Key", "Ascend").limit(1).exec()).kvs;
+    if (!entry) return false;
+    const raw = entry.key.toString();
+    const [deadlineAt, gameId] = raw.slice(raw.indexOf(keys.deadlinePrefix) + keys.deadlinePrefix.length).split("/");
+    if (Date.parse(now) < Date.parse(deadlineAt) + TIMEOUT_GRACE_MS) return false;
+
+    const game = await this.readGame(entry.value.toString());
+    const timeout = game ? dueTimeout(game.state, now) : null;
+    if (!game || !timeout) {
+      // The index entry no longer matches the game; drop it unless it has just been rewritten.
+      const key = keys.deadline(deadlineAt, gameId);
+      await this.kv.if(key, "Mod", "==", entry.mod_revision).then(this.kv.delete().key(key)).commit();
+      return true;
+    }
+    const applied = applyGameCommand(game.state, timeout);
+    if (!applied.ok) throw new Error(applied.error.code);
+    // If a move or another node got there first, the compare fails and the next call sees the new state.
+    await this.kv
+      .if(keys.game(gameId), "Mod", "==", game.modRevision)
+      .then(...this.transitionWrites(game.state, applied.value.state))
+      .commit();
+    return true;
+  }
+
+  /**
+   * The writes that move a stored game from `previous` to `next`: the game itself, its entries in the
+   * deadline index, and, once it finishes, freeing both players.
+   */
+  private transitionWrites(previous: GameState, next: GameState): IOperation[] {
+    const writes: IOperation[] = [this.kv.put(keys.game(next.gameId)).value(encode(next))];
+    for (const field of ["turnDeadlineAt", "placementDeadlineAt"] as const) {
+      const before = previous[field];
+      const after = next[field];
+      if (before === after) continue;
+      if (before) writes.push(this.kv.delete().key(keys.deadline(before, next.gameId)));
+      if (after) writes.push(this.kv.put(keys.deadline(after, next.gameId)).value(next.gameCode));
+    }
+    if (next.status === "FINISHED") {
+      for (const player of [next.playerOne, next.playerTwo]) {
+        if (player) writes.push(this.kv.delete().key(keys.activeGame(player.id)));
+      }
+    }
+    return writes;
   }
 }
 

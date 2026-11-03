@@ -8,9 +8,9 @@ if (!url) throw new Error("TEST_DATABASE_URL is required; run the tests with `np
 const admin = new pg.Pool({ connectionString: url });
 
 defineStoreContract("postgres", {
-  async open() {
+  async open(options) {
     process.env.DATABASE_URL = url;
-    const backend = createPostgresBackend({ timeoutEnabled: false });
+    const backend = createPostgresBackend({ timeoutEnabled: options?.timeoutEnabled ?? false });
     await backend.start();
     return backend;
   },
