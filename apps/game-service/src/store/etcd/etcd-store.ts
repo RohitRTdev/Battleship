@@ -46,6 +46,9 @@ function firstKv(response: IRangeResponse | undefined): IKeyValue | undefined {
 
 /** GameStore on etcd. Operations are filled in one at a time; the rest reject. */
 export class EtcdStore implements GameStore {
+  /** Tail of this node's matchmaking requests; see `oneAtATime`. */
+  private matchmakingTail: Promise<unknown> = Promise.resolve();
+
   constructor(
     private readonly kv: Namespace,
     private readonly timeoutEnabled: boolean
@@ -172,7 +175,21 @@ export class EtcdStore implements GameStore {
     return { state: decode<GameState>(game.value), modRevision: game.mod_revision };
   }
 
-  async startMatchmaking(actor: Player): Promise<Result<PlayerStateResponse>> {
+  /**
+   * Every matchmaking request races for the same queue head, so concurrent requests mostly waste each other's
+   * work. Running this node's requests one at a time leaves compare-and-swap conflicts only between nodes.
+   */
+  private oneAtATime<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.matchmakingTail.then(run, run);
+    this.matchmakingTail = result.catch(() => undefined);
+    return result;
+  }
+
+  startMatchmaking(actor: Player): Promise<Result<PlayerStateResponse>> {
+    return this.oneAtATime(() => this.matchmake(actor));
+  }
+
+  private async matchmake(actor: Player): Promise<Result<PlayerStateResponse>> {
     for (let attempt = 0; attempt < MATCHMAKING_ATTEMPTS; attempt += 1) {
       if (attempt > 0) await backoff(attempt);
       const current = await this.getPlayerState(actor.id);

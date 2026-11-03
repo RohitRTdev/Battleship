@@ -36,13 +36,28 @@ defineStoreContract("etcd", {
   pending: [
     "a finished game queues exactly one archive job",
     "a failed archive write is retried later instead of being lost",
-    "simultaneous matchmaking requests pair every player exactly once",
     "updates wake listeners for the changed game",
     "presence reports recently seen players as connected"
   ]
 });
 
 describe("etcd store", () => {
+  test("two nodes matchmaking at once never leave both players waiting", async () => {
+    const nodes = [backendFor(endpoints), backendFor(endpoints)];
+    for (const node of nodes) await node.start();
+    try {
+      for (let round = 0; round < 25; round += 1) {
+        await admin.namespace(NAMESPACE).delete().all();
+        const players = [{ id: `left-${round}`, username: "left" }, { id: `right-${round}`, username: "right" }];
+        const results = await Promise.all(players.map((searcher, index) => nodes[index].store.startMatchmaking(searcher)));
+        const states = results.map((result) => ok(result).state).sort();
+        assert.deepEqual(states, ["PLAYING", "SEARCHING"], `round ${round}: ${states.join(", ")}`);
+      }
+    } finally {
+      for (const node of nodes) await node.close();
+    }
+  });
+
   test("matchmaking skips a stale queue entry for a player already in a game", async () => {
     const backend = backendFor(endpoints);
     await backend.start();
