@@ -35,8 +35,7 @@ defineStoreContract("etcd", {
   },
   pending: [
     "a finished game queues exactly one archive job",
-    "a failed archive write is retried later instead of being lost",
-    "presence reports recently seen players as connected"
+    "a failed archive write is retried later instead of being lost"
   ]
 });
 
@@ -54,6 +53,27 @@ describe("etcd store", () => {
       }
     } finally {
       for (const node of nodes) await node.close();
+    }
+  });
+
+  test("presence turns LAGGING after 10 s and is dropped when the game finishes", async () => {
+    const backend = backendFor(endpoints);
+    await backend.start();
+    try {
+      await admin.namespace(NAMESPACE).delete().all();
+      const first = { id: "presence-first", username: "first" };
+      const second = { id: "presence-second", username: "second" };
+      const created = ok(await backend.store.create(first)).state;
+      ok(await backend.store.command(created.gameCode, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+      const state = ok(await backend.store.getState(created.gameCode));
+      await admin.namespace(NAMESPACE).put(keys.presence(state.gameId, first.id)).value(new Date(Date.now() - 11_000).toISOString());
+      await backend.store.touchPresence(state.gameId, second.id);
+      assert.deepEqual(await backend.store.presence(state.gameId, state), { [first.id]: "LAGGING", [second.id]: "CONNECTED" });
+
+      ok(await backend.store.command(created.gameCode, second, (_state, occurredAt) => ({ type: "CANCEL_GAME", actor: second, occurredAt })));
+      assert.deepEqual(await admin.namespace(NAMESPACE).getAll().prefix(keys.presencePrefix(state.gameId)).keys(), []);
+    } finally {
+      await backend.close();
     }
   });
 

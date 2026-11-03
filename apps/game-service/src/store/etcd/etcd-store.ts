@@ -25,16 +25,13 @@ export type ActiveGame = { gameId: string; gameCode: string };
 export type QueueEntry = { username: string; enqueuedAt: string };
 
 const CODE_ATTEMPTS = 8;
+const PRESENCE_WINDOW_MS = 10_000;
 const COMMAND_ATTEMPTS = 50;
 const MATCHMAKING_ATTEMPTS = 50;
 
 /** Short random wait before retrying a conflicting write, so racing requests spread out. */
 function backoff(attempt: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(50, 2 * attempt)));
-}
-
-function notImplemented(operation: string): never {
-  throw new Error(`etcd store: ${operation} is not implemented yet`);
 }
 
 function failed<T>(code: Parameters<typeof domainError>[0]): Result<T> {
@@ -47,7 +44,7 @@ function firstKv(response: IRangeResponse | undefined): IKeyValue | undefined {
   return response?.kvs[0];
 }
 
-/** GameStore on etcd. Operations are filled in one at a time; the rest reject. */
+/** GameStore on etcd: game state, matchmaking, deadlines and presence as keys under one namespace. */
 export class EtcdStore implements GameStore {
   /** Tail of this node's matchmaking requests; see `oneAtATime`. */
   private matchmakingTail: Promise<unknown> = Promise.resolve();
@@ -266,12 +263,23 @@ export class EtcdStore implements GameStore {
     return Number(removed.deleted) > 0 ? { state: "NOT_PLAYING" } : this.getPlayerState(playerId);
   }
 
-  async touchPresence(_gameId: string, _playerId: string): Promise<void> {
-    return notImplemented("touchPresence");
+  /** Records when a player last polled the game; the value is this node's clock, like every other etcd timestamp. */
+  async touchPresence(gameId: string, playerId: string): Promise<void> {
+    await this.kv.put(keys.presence(gameId, playerId)).value(await this.currentTime());
   }
 
-  async presence(_gameId: string, _state: GameState): Promise<Record<string, ConnectionStatus>> {
-    return notImplemented("presence");
+  /** Players seen in the last 10 s are CONNECTED, others seen before are LAGGING, the rest UNKNOWN (as in Postgres). */
+  async presence(gameId: string, state: GameState): Promise<Record<string, ConnectionStatus>> {
+    const now = Date.parse(await this.currentTime());
+    const presence: Record<string, ConnectionStatus> = { [state.playerOne.id]: "UNKNOWN" };
+    if (state.playerTwo) presence[state.playerTwo.id] = "UNKNOWN";
+    const prefix = keys.presencePrefix(gameId);
+    for (const kv of (await this.kv.getAll().prefix(prefix).exec()).kvs) {
+      const key = kv.key.toString();
+      const lastSeen = Date.parse(kv.value.toString());
+      presence[key.slice(key.indexOf(prefix) + prefix.length)] = now - lastSeen <= PRESENCE_WINDOW_MS ? "CONNECTED" : "LAGGING";
+    }
+    return presence;
   }
 
   async expireOneTurn(): Promise<boolean> {
@@ -335,7 +343,7 @@ export class EtcdStore implements GameStore {
 
   /**
    * The writes that move a stored game from `previous` to `next`: the game itself, its entries in the
-   * deadline index, and, once it finishes, freeing both players.
+   * deadline index, and, once it finishes, freeing both players and dropping their presence.
    */
   private transitionWrites(previous: GameState, next: GameState): IOperation[] {
     const writes: IOperation[] = [this.kv.put(keys.game(next.gameId)).value(encode(next))];
@@ -350,6 +358,7 @@ export class EtcdStore implements GameStore {
       for (const player of [next.playerOne, next.playerTwo]) {
         if (player) writes.push(this.kv.delete().key(keys.activeGame(player.id)));
       }
+      writes.push(this.kv.delete().prefix(keys.presencePrefix(next.gameId)));
     }
     return writes;
   }
