@@ -15,7 +15,7 @@ import {
   type Result
 } from "../../game/index.js";
 import type { ArchiveJobResult, ArchiveOutbox } from "../archive-outbox.js";
-import type { CommandResult, GameStore, UpdateBus } from "../game-store.js";
+import type { CommandResult, GameStore } from "../game-store.js";
 import { isEtcdUnavailable } from "./errors.js";
 import { decode, encode, keys } from "./keys.js";
 
@@ -353,14 +353,6 @@ export class EtcdStore implements GameStore {
     }
     return writes;
   }
-}
-
-/** Placeholder until the watch-based bus: listeners are never woken, so long-polls fall back to their timeout. */
-export class EtcdUpdateBus implements UpdateBus {
-  on(): void {}
-  off(): void {}
-  onPlayer(): void {}
-  offPlayer(): void {}
 }
 
 /** Placeholder until archive jobs are written to etcd: there are never any jobs. */

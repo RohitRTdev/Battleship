@@ -249,6 +249,30 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       }
     });
 
+    it("a match made on another node wakes the waiting player", async () => {
+      const otherNode = await harness.open();
+      const waiting = player();
+      let listener = () => {};
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        ok(await store.startMatchmaking(waiting));
+        const matched = new Promise<void>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("waiting player not woken within 2s")), 2_000);
+          // Earlier notifications (such as the enqueue itself) may arrive first; wait for the one that shows the match.
+          listener = () => {
+            void store.getPlayerState(waiting.id).then((state) => { if (state.state === "PLAYING") resolve(); });
+          };
+          backend.updates.onPlayer(waiting.id, listener);
+        });
+        assert.equal(ok(await otherNode.store.startMatchmaking(player())).state, "PLAYING");
+        await matched;
+      } finally {
+        clearTimeout(timer);
+        backend.updates.offPlayer(waiting.id, listener);
+        await otherNode.close();
+      }
+    });
+
     it("presence reports recently seen players as connected", async () => {
       const { first, state } = await activeGame(store);
       await store.touchPresence(state.gameId, first.id);

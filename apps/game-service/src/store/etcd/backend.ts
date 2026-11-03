@@ -1,7 +1,8 @@
 import { Etcd3 } from "etcd3";
 import type { StoreBackend, StoreOptions } from "../index.js";
 import { isEtcdUnavailable } from "./errors.js";
-import { EtcdArchiveOutbox, EtcdStore, EtcdUpdateBus } from "./etcd-store.js";
+import { EtcdArchiveOutbox, EtcdStore } from "./etcd-store.js";
+import { EtcdUpdateBus } from "./watch-bus.js";
 import { keys, NAMESPACE } from "./keys.js";
 
 const CALL_TIMEOUT_MS = 2_000;
@@ -16,6 +17,7 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
     defaultCallOptions: () => ({ deadline: Date.now() + CALL_TIMEOUT_MS })
   });
   const kv = client.namespace(NAMESPACE);
+  const updates = new EtcdUpdateBus(kv);
   let ready = false;
 
   // A linearizable read needs a quorum, so it fails while the cluster has no leader.
@@ -25,13 +27,14 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
 
   return {
     store: new EtcdStore(kv, options.timeoutEnabled),
-    updates: new EtcdUpdateBus(),
+    updates,
     outbox: new EtcdArchiveOutbox(),
 
     async start() {
       while (true) {
         try {
           await probe();
+          await updates.start();
           ready = true;
           return;
         } catch (error) {
@@ -59,6 +62,7 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
 
     async close() {
       ready = false;
+      await updates.close().catch(() => undefined);
       client.close();
     }
   };

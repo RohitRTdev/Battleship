@@ -36,7 +36,6 @@ defineStoreContract("etcd", {
   pending: [
     "a finished game queues exactly one archive job",
     "a failed archive write is retried later instead of being lost",
-    "updates wake listeners for the changed game",
     "presence reports recently seen players as connected"
   ]
 });
