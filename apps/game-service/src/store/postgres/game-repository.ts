@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { ConnectionStatus, GameStatus, PlayerStateResponse } from "@battleship/game-contract";
 import type { Pool, PoolClient } from "pg";
 import type { CommandResult, GameStore } from "../game-store.js";
@@ -7,6 +7,7 @@ import {
   createGame,
   domainError,
   eventCommand,
+  generateGameCode,
   replayCommands,
   type DomainError,
   type GameCommand,
@@ -15,8 +16,6 @@ import {
   type Player,
   type Result
 } from "../../game/index.js";
-
-const CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 type GameRow = { id: string };
 type EventRow = { payload: PersistedCommand };
@@ -32,10 +31,6 @@ type PlayerStateRow = {
 
 const MATCHMAKING_LOCK_KEY = "1947452302";
 const PLAYER_LOCK_NAMESPACE = "1947452303";
-
-function generateGameCode(): string {
-  return [...randomBytes(8)].map((byte) => CODE_ALPHABET[byte % CODE_ALPHABET.length]).join("");
-}
 
 function normalizeTime(value: Date): string {
   return value.toISOString();

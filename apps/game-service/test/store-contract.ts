@@ -209,18 +209,21 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       const second = player();
       const created = ok(await store.create(first)).state;
       // Notifications are asynchronous, so the one for the create itself may still arrive after this point.
+      let listener: (version: number) => void = () => {};
+      let timer: NodeJS.Timeout | undefined;
       const woke = new Promise<number>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("no update within 2s")), 2_000);
-        const listener = (version: number) => {
-          if (version < 2) return;
-          clearTimeout(timer);
-          backend.updates.off(created.gameId, listener);
-          resolve(version);
-        };
+        timer = setTimeout(() => reject(new Error("no update within 2s")), 2_000);
+        listener = (version) => { if (version >= 2) resolve(version); };
         backend.updates.on(created.gameId, listener);
       });
-      ok(await store.command(created.gameCode, second, join(second)));
-      assert.equal(await woke, 2);
+      try {
+        ok(await store.command(created.gameCode, second, join(second)));
+        assert.equal(await woke, 2);
+      } finally {
+        clearTimeout(timer);
+        backend.updates.off(created.gameId, listener);
+        woke.catch(() => undefined);
+      }
     });
 
     it("presence reports recently seen players as connected", async () => {

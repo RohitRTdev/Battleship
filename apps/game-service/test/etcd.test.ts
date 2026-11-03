@@ -29,7 +29,6 @@ defineStoreContract("etcd", {
     admin.close();
   },
   pending: [
-    "create makes a waiting game owned by its creator",
     "a player can be in only one active game",
     "commands are validated against the stored state",
     "a full game finishes once, frees both players and queues one archive job",
