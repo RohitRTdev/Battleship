@@ -10,7 +10,7 @@ import { createGameRouter } from "./http/game-router.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
 
-const serviceName = process.env.SERVICE_NAME ?? "raft-backend";
+const serviceName = process.env.SERVICE_NAME ?? "game-service";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
 const grpcPort = Number(process.env.GRPC_PORT ?? 9090);

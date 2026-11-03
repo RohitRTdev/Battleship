@@ -1,22 +1,22 @@
 FROM node:24-bookworm-slim AS dependencies
 WORKDIR /workspace
 COPY package.json package-lock.json ./
-COPY apps/raft-node/package.json apps/raft-node/package.json
+COPY apps/game-service/package.json apps/game-service/package.json
 COPY packages/auth-token/package.json packages/auth-token/package.json
 COPY packages/game-contract/package.json packages/game-contract/package.json
 COPY packages/protocol/package.json packages/protocol/package.json
-RUN npm ci --workspace=@battleship/raft-node --workspace=@battleship/auth-token --workspace=@battleship/game-contract --workspace=@battleship/protocol --include-workspace-root=false
+RUN npm ci --workspace=@battleship/game-service --workspace=@battleship/auth-token --workspace=@battleship/game-contract --workspace=@battleship/protocol --include-workspace-root=false
 
 FROM dependencies AS dev
 COPY tsconfig.base.json ./
 COPY packages/auth-token packages/auth-token
 COPY packages/game-contract packages/game-contract
 COPY packages/protocol packages/protocol
-COPY apps/raft-node apps/raft-node
+COPY apps/game-service apps/game-service
 RUN npm run build --workspace=@battleship/protocol \
     && npm run build --workspace=@battleship/auth-token \
     && npm run build --workspace=@battleship/game-contract
-CMD ["npm", "run", "dev", "--workspace=@battleship/raft-node"]
+CMD ["npm", "run", "dev", "--workspace=@battleship/game-service"]
 
 FROM dependencies AS build
 ADD --chmod=0444 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /workspace/rds-global-bundle.pem
@@ -24,11 +24,11 @@ COPY tsconfig.base.json ./
 COPY packages/auth-token packages/auth-token
 COPY packages/game-contract packages/game-contract
 COPY packages/protocol packages/protocol
-COPY apps/raft-node apps/raft-node
+COPY apps/game-service apps/game-service
 RUN npm run build --workspace=@battleship/protocol \
     && npm run build --workspace=@battleship/auth-token \
     && npm run build --workspace=@battleship/game-contract \
-    && npm run build --workspace=@battleship/raft-node \
+    && npm run build --workspace=@battleship/game-service \
     && npm prune --omit=dev
 
 FROM node:24-bookworm-slim AS frontend-build
@@ -48,8 +48,8 @@ ENV NODE_ENV=production
 ENV NODE_EXTRA_CA_CERTS=/workspace/rds-global-bundle.pem
 COPY --from=build /workspace/rds-global-bundle.pem /workspace/rds-global-bundle.pem
 COPY --from=build /workspace/node_modules node_modules
-COPY --from=build /workspace/apps/raft-node/package.json apps/raft-node/package.json
-COPY --from=build /workspace/apps/raft-node/dist apps/raft-node/dist
+COPY --from=build /workspace/apps/game-service/package.json apps/game-service/package.json
+COPY --from=build /workspace/apps/game-service/dist apps/game-service/dist
 COPY --from=build /workspace/packages/auth-token/package.json packages/auth-token/package.json
 COPY --from=build /workspace/packages/auth-token/dist packages/auth-token/dist
 COPY --from=build /workspace/packages/game-contract/package.json packages/game-contract/package.json
@@ -59,4 +59,4 @@ COPY --from=build /workspace/packages/protocol/dist packages/protocol/dist
 COPY --from=frontend-build /workspace/apps/frontend/dist apps/frontend/dist
 RUN chown -R node:node /workspace
 USER node
-CMD ["node", "apps/raft-node/dist/main.js"]
+CMD ["node", "apps/game-service/dist/main.js"]

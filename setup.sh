@@ -101,7 +101,7 @@ up_prod() {
   ECR_REGISTRY="$registry" ECR_PASSWORD_FILE="$temporary_docker_config/ecr-password" DOCKER_AUTH_FILE="$temporary_docker_config/config.json" \
     node -e 'const fs=require("node:fs");const password=fs.readFileSync(process.env.ECR_PASSWORD_FILE,"utf8").trim();if(!password)throw new Error("AWS returned an empty ECR password");const auth=Buffer.from(`AWS:${password}`).toString("base64");fs.writeFileSync(process.env.DOCKER_AUTH_FILE,JSON.stringify({auths:{[process.env.ECR_REGISTRY]:{auth}}}),{mode:0o600})'
   rm -f "$temporary_docker_config/ecr-password"
-  docker build --file apps/raft-node/Dockerfile --target production --tag "$backend_image" .
+  docker build --file apps/game-service/Dockerfile --target production --tag "$backend_image" .
   docker --config "$temporary_docker_config" push "$backend_image"
   cleanup_docker_config
   trap - EXIT HUP INT TERM

@@ -22,16 +22,16 @@ x-node-healthcheck: &node-healthcheck
 
 x-backend-environment: &backend-environment
   <<: *topology-environment
-  SERVICE_NAME: raft-backend
+  SERVICE_NAME: game-service
   DATABASE_URL: postgresql://${POSTGRES_USER:-battleship}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-battleship}
   RAFT_PEERS: backend-node-1:9090,backend-node-2:9090,backend-node-3:9090
   MATCH_ARCHIVE_PATH: /data/matches
 
 x-backend-common: &backend-common
-  image: battleship/raft-node:dev
+  image: battleship/game-service:dev
   build:
     context: .
-    dockerfile: apps/raft-node/Dockerfile
+    dockerfile: apps/game-service/Dockerfile
     target: dev
   restart: unless-stopped
   depends_on:
@@ -97,7 +97,7 @@ services:
       <<: *backend-environment
       NODE_ID: backend-node-1
     volumes:
-      - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./apps/game-service/src:/workspace/apps/game-service/src:ro
       - ./runtime/matches:/data/matches
 
   backend-node-2:
@@ -107,7 +107,7 @@ services:
       <<: *backend-environment
       NODE_ID: backend-node-2
     volumes:
-      - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./apps/game-service/src:/workspace/apps/game-service/src:ro
       - ./runtime/matches:/data/matches
 
   backend-node-3:
@@ -117,7 +117,7 @@ services:
       <<: *backend-environment
       NODE_ID: backend-node-3
     volumes:
-      - ./apps/raft-node/src:/workspace/apps/raft-node/src:ro
+      - ./apps/game-service/src:/workspace/apps/game-service/src:ro
       - ./runtime/matches:/data/matches
 
   frontend:
