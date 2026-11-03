@@ -2,11 +2,7 @@ import { authorizeUser, createTokenVerifierFromEnvironment } from "@battleship/a
 import { startInternalGrpcServer } from "@battleship/protocol";
 import express from "express";
 import path from "node:path";
-import { Pool } from "pg";
-import { runMigrations } from "./store/postgres/migrations.js";
-import { GameRepository } from "./store/postgres/game-repository.js";
-import { GameUpdateBus } from "./store/postgres/update-bus.js";
-import { PostgresArchiveOutbox } from "./store/postgres/archive-outbox.js";
+import { createStoreBackend } from "./store/index.js";
 import { createGameRouter } from "./http/game-router.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
@@ -15,78 +11,41 @@ const serviceName = process.env.SERVICE_NAME ?? "game-service";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
 const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
-const databaseUrl = process.env.DATABASE_URL;
+const storeMode = process.env.STORE_MODE ?? "postgres";
 const tokenVerifier = await createTokenVerifierFromEnvironment();
 const production = process.env.APP_ENV === "prod";
 const frontendDirectory = path.resolve(process.cwd(), "apps/frontend/dist");
 
-if (!databaseUrl && !(process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE)) {
-  throw new Error("DATABASE_URL or PostgreSQL PG* environment variables are required");
-}
-
-let ready = false;
-let databaseReady = false;
-let shuttingDown = false;
-
-const database = new Pool({
-  ...(databaseUrl ? { connectionString: databaseUrl } : {}),
-  connectionTimeoutMillis: 2_000,
-  query_timeout: 2_000
-});
-
-database.on("error", (error) => {
-  databaseReady = false;
-  console.error("PostgreSQL pool error", error);
-});
-
 const disableTimeout = process.env.DISABLE_TIMEOUT ?? "false";
 if (disableTimeout !== "true" && disableTimeout !== "false") throw new Error("DISABLE_TIMEOUT must be true or false");
 const timeoutEnabled = disableTimeout === "false";
-const repository = new GameRepository(database, timeoutEnabled);
+
+let ready = false;
+let shuttingDown = false;
+
+const backend = createStoreBackend(storeMode, { timeoutEnabled });
+const { store, updates } = backend;
 let timeoutWorkerRunning = false;
 let timeoutWorkerClosed = false;
 async function expireTurns(): Promise<void> {
   if (timeoutWorkerRunning || timeoutWorkerClosed) return;
   timeoutWorkerRunning = true;
-  try { while (!timeoutWorkerClosed && await repository.expireOneTurn()) { /* drain expired games */ } }
+  try { while (!timeoutWorkerClosed && await store.expireOneTurn()) { /* drain expired games */ } }
   catch (error) { console.error("Turn timeout worker failed", error); }
   finally { timeoutWorkerRunning = false; }
 }
 let timeoutTimer: NodeJS.Timeout | null = null;
-const updates = new GameUpdateBus(database);
 const archive = createMatchArchive();
-const archiveWorker = new ArchiveWorker(new PostgresArchiveOutbox(database, updates), archive);
+const archiveWorker = new ArchiveWorker(backend.outbox, archive);
 
-async function initializeDatabase(): Promise<void> {
-  while (true) {
-    try {
-      await database.query("SELECT 1");
-      const migrationClient = await database.connect();
-      try {
-        await runMigrations(migrationClient);
-      } finally {
-        migrationClient.release();
-      }
-      await updates.start();
-      archiveWorker.start();
-      if (timeoutEnabled && !timeoutTimer) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
-      databaseReady = true;
-      return;
-    } catch (error) {
-      databaseReady = false;
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`PostgreSQL initialization failed; retrying in 1 second: ${message}`);
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-  }
-}
-
-await initializeDatabase();
+await backend.start();
+archiveWorker.start();
+if (timeoutEnabled) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
 
 const grpcServer = await startInternalGrpcServer(grpcPort, {
   serviceName,
   nodeId,
-  isReady: () => ready && databaseReady
+  isReady: () => ready && backend.isReady()
 });
 
 const app = express();
@@ -98,13 +57,7 @@ app.use((_request, response, next) => {
 });
 
 app.get("/healthz", async (_request, response) => {
-  try {
-    await database.query("SELECT 1");
-    databaseReady = true;
-  } catch {
-    databaseReady = false;
-  }
-
+  const databaseReady = await backend.checkHealth();
   const healthy = ready && databaseReady;
   response.status(healthy ? 200 : 503).json({
     service: serviceName,
@@ -127,7 +80,7 @@ if (production) {
   app.use(express.static(frontendDirectory));
 }
 
-app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(repository, updates, archive));
+app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(store, updates, archive));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
@@ -153,7 +106,7 @@ await new Promise<void>((resolve, reject) => {
 });
 ready = true;
 
-console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} and gRPC ${grpcPort}`);
+console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} and gRPC ${grpcPort} (store: ${storeMode})`);
 
 function shutdown(): void {
   if (shuttingDown) {
@@ -162,14 +115,12 @@ function shutdown(): void {
 
   shuttingDown = true;
   ready = false;
-  databaseReady = false;
   httpServer.close(() => {
     grpcServer.tryShutdown(() => {
       timeoutWorkerClosed = true;
       if (timeoutTimer) clearInterval(timeoutTimer);
       archiveWorker.close();
-      updates.close();
-      void database.end().finally(() => process.exit(0));
+      void backend.close().finally(() => process.exit(0));
     });
   });
 }

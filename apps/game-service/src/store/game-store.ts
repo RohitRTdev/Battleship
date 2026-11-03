@@ -23,6 +23,8 @@ export interface GameStore {
   cancelMatchmaking(playerId: string): Promise<PlayerStateResponse>;
   touchPresence(gameId: string, playerId: string): Promise<void>;
   presence(gameId: string, state: GameState): Promise<Record<string, ConnectionStatus>>;
+  /** Applies a timeout to one game whose deadline has passed. Returns false when none is due. */
+  expireOneTurn(): Promise<boolean>;
 }
 
 /** Wakes waiting long-polls on any node when a game or a player's state changes. */
