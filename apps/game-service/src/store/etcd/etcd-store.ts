@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ConnectionStatus, PlayerStateResponse } from "@battleship/game-contract";
-import type { IKeyValue, IOperation, IRangeResponse, Namespace } from "etcd3";
+import type { ComparatorBuilder, IKeyValue, IOperation, IRangeResponse, IResponseOp, Namespace } from "etcd3";
 import {
   applyGameCommand,
   createGame,
@@ -16,6 +16,7 @@ import {
 } from "../../game/index.js";
 import type { ArchiveJobResult, ArchiveOutbox } from "../archive-outbox.js";
 import type { CommandResult, GameStore, UpdateBus } from "../game-store.js";
+import { isEtcdUnavailable } from "./errors.js";
 import { decode, encode, keys } from "./keys.js";
 
 /** Value of players/<id>/active: the one game the player is in. */
@@ -39,6 +40,8 @@ function notImplemented(operation: string): never {
 function failed<T>(code: Parameters<typeof domainError>[0]): Result<T> {
   return { ok: false, error: domainError(code) };
 }
+
+const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function firstKv(response: IRangeResponse | undefined): IKeyValue | undefined {
   return response?.kvs[0];
@@ -75,7 +78,7 @@ export class EtcdStore implements GameStore {
       const active: ActiveGame = { gameId: state.gameId, gameCode: state.gameCode };
 
       // One transaction claims the code and the player's only active-game slot, and checks they are not searching.
-      const result = await this.kv
+      const transaction = this.kv
         .if(keys.code(state.gameCode), "Create", "==", 0)
         .and(keys.activeGame(actor.id), "Create", "==", 0)
         .and(keys.queueEntry(actor.id), "Create", "==", 0)
@@ -84,8 +87,8 @@ export class EtcdStore implements GameStore {
           this.kv.put(keys.code(state.gameCode)).value(state.gameId),
           this.kv.put(keys.activeGame(actor.id)).value(encode(active))
         )
-        .else(this.kv.get(keys.queueEntry(actor.id)), this.kv.get(keys.activeGame(actor.id)))
-        .commit();
+        .else(this.kv.get(keys.queueEntry(actor.id)), this.kv.get(keys.activeGame(actor.id)));
+      const result = await this.commitConfirmed(transaction, keys.game(state.gameId), encode(state));
       if (result.succeeded) return { ok: true, value: { state, outcome: created.value.outcome } };
 
       const [searching, playing] = result.responses.map((response) => firstKv(response.response_range));
@@ -129,10 +132,8 @@ export class EtcdStore implements GameStore {
         writes.push(this.kv.put(keys.activeGame(actor.id)).value(encode(active)));
       }
 
-      const result = await transaction
-        .then(...writes)
-        .else(this.kv.get(keys.queueEntry(actor.id)), this.kv.get(keys.activeGame(actor.id)))
-        .commit();
+      transaction.then(...writes).else(this.kv.get(keys.queueEntry(actor.id)), this.kv.get(keys.activeGame(actor.id)));
+      const result = await this.commitConfirmed(transaction, keys.game(next.gameId), encode(next));
       if (result.succeeded) {
         return late ? failed(late.error) : { ok: true, value: { state: next, outcome: applied.value.outcome } };
       }
@@ -204,12 +205,12 @@ export class EtcdStore implements GameStore {
 
       if (!head) {
         const entry: QueueEntry = { username: actor.username, enqueuedAt: await this.currentTime() };
-        const queued = await this.kv
+        const enqueue = this.kv
           .if(keys.queueEpoch, "Mod", "==", epochRevision)
           .and(keys.activeGame(actor.id), "Create", "==", 0)
           .and(keys.queueEntry(actor.id), "Create", "==", 0)
-          .then(this.kv.put(keys.queueEpoch).value(""), this.kv.put(keys.queueEntry(actor.id)).value(encode(entry)))
-          .commit();
+          .then(this.kv.put(keys.queueEpoch).value(""), this.kv.put(keys.queueEntry(actor.id)).value(encode(entry)));
+        const queued = await this.commitConfirmed(enqueue, keys.queueEntry(actor.id), encode(entry));
         if (queued.succeeded) return { ok: true, value: { state: "SEARCHING", searchStartedAt: entry.enqueuedAt } };
         continue;
       }
@@ -235,7 +236,7 @@ export class EtcdStore implements GameStore {
       const active: ActiveGame = { gameId: state.gameId, gameCode: state.gameCode };
 
       // Commit only if the opponent is still waiting and neither player has entered a game meanwhile.
-      const matched = await this.kv
+      const match = this.kv
         .if(keys.queueEntry(opponent.id), "Mod", "==", head.mod_revision)
         .and(keys.activeGame(opponent.id), "Create", "==", 0)
         .and(keys.activeGame(actor.id), "Create", "==", 0)
@@ -248,8 +249,8 @@ export class EtcdStore implements GameStore {
           this.kv.put(keys.activeGame(actor.id)).value(encode(active)),
           this.kv.delete().key(keys.queueEntry(opponent.id))
         )
-        .else(this.kv.get(keys.activeGame(opponent.id)))
-        .commit();
+        .else(this.kv.get(keys.activeGame(opponent.id)));
+      const matched = await this.commitConfirmed(match, keys.game(state.gameId), encode(state));
       if (matched.succeeded) return { ok: true, value: { state: "PLAYING", gameCode: state.gameCode, gameStatus: state.status } };
       if (firstKv(matched.responses[0]?.response_range)) {
         // A queued player who is already in a game would block the queue head forever; drop the stale entry.
@@ -298,6 +299,38 @@ export class EtcdStore implements GameStore {
       .then(...this.transitionWrites(game.state, applied.value.state))
       .commit();
     return true;
+  }
+
+  /**
+   * Commits a transaction whose success means `key` now holds `value`, a value no other request writes. If etcd
+   * drops the connection, or the compare fails, the write may still have landed: a leader can commit and die before
+   * replying, and the client library may retry a commit that already succeeded. Reading `key` back tells us.
+   */
+  private async commitConfirmed(
+    transaction: ComparatorBuilder,
+    key: string,
+    value: string
+  ): Promise<{ succeeded: boolean; responses: IResponseOp[] }> {
+    try {
+      const result = await transaction.commit();
+      if (result.succeeded || (await this.kv.get(key).string()) !== value) return result;
+    } catch (error) {
+      if (!isEtcdUnavailable(error) || !(await this.landedAfterOutage(key, value, error))) throw error;
+    }
+    return { succeeded: true, responses: [] };
+  }
+
+  /** Reads `key` until etcd answers again (for up to 5 s), then reports whether it holds `value`. */
+  private async landedAfterOutage(key: string, value: string, outage: unknown): Promise<boolean> {
+    const giveUpAt = Date.now() + 5_000;
+    while (true) {
+      try {
+        return (await this.kv.get(key).string()) === value;
+      } catch (error) {
+        if (!isEtcdUnavailable(error) || Date.now() > giveUpAt) throw outage;
+        await sleep(250);
+      }
+    }
   }
 
   /**
