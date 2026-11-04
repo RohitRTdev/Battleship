@@ -1,5 +1,4 @@
 import { authorizeUser, createTokenVerifierFromEnvironment } from "@battleship/auth-token";
-import { startInternalGrpcServer } from "@battleship/protocol";
 import express from "express";
 import path from "node:path";
 import { createStoreBackend } from "./store/index.js";
@@ -10,7 +9,6 @@ import { ArchiveWorker } from "./archive/archive-worker.js";
 const serviceName = process.env.SERVICE_NAME ?? "game-service";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
-const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
 const storeMode = process.env.STORE_MODE ?? "postgres";
 const tokenVerifier = await createTokenVerifierFromEnvironment();
 const production = process.env.APP_ENV === "prod";
@@ -42,11 +40,6 @@ await backend.start();
 archiveWorker.start();
 if (timeoutEnabled) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
 
-const grpcServer = await startInternalGrpcServer(grpcPort, {
-  serviceName,
-  nodeId,
-  isReady: () => ready && backend.isReady()
-});
 
 const app = express();
 app.disable("etag");
@@ -105,7 +98,7 @@ await new Promise<void>((resolve, reject) => {
 });
 ready = true;
 
-console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} and gRPC ${grpcPort} (store: ${storeMode})`);
+console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} (store: ${storeMode})`);
 
 function shutdown(): void {
   if (shuttingDown) {
@@ -115,12 +108,10 @@ function shutdown(): void {
   shuttingDown = true;
   ready = false;
   httpServer.close(() => {
-    grpcServer.tryShutdown(() => {
-      timeoutWorkerClosed = true;
-      if (timeoutTimer) clearInterval(timeoutTimer);
-      archiveWorker.close();
-      void backend.close().finally(() => process.exit(0));
-    });
+    timeoutWorkerClosed = true;
+    if (timeoutTimer) clearInterval(timeoutTimer);
+    archiveWorker.close();
+    void backend.close().finally(() => process.exit(0));
   });
 }
 

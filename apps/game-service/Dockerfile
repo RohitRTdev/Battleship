@@ -4,17 +4,14 @@ COPY package.json package-lock.json ./
 COPY apps/game-service/package.json apps/game-service/package.json
 COPY packages/auth-token/package.json packages/auth-token/package.json
 COPY packages/game-contract/package.json packages/game-contract/package.json
-COPY packages/protocol/package.json packages/protocol/package.json
-RUN npm ci --workspace=@battleship/game-service --workspace=@battleship/auth-token --workspace=@battleship/game-contract --workspace=@battleship/protocol --include-workspace-root=false
+RUN npm ci --workspace=@battleship/game-service --workspace=@battleship/auth-token --workspace=@battleship/game-contract --include-workspace-root=false
 
 FROM dependencies AS dev
 COPY tsconfig.base.json ./
 COPY packages/auth-token packages/auth-token
 COPY packages/game-contract packages/game-contract
-COPY packages/protocol packages/protocol
 COPY apps/game-service apps/game-service
-RUN npm run build --workspace=@battleship/protocol \
-    && npm run build --workspace=@battleship/auth-token \
+RUN npm run build --workspace=@battleship/auth-token \
     && npm run build --workspace=@battleship/game-contract
 CMD ["npm", "run", "dev", "--workspace=@battleship/game-service"]
 
@@ -23,10 +20,8 @@ ADD --chmod=0444 https://truststore.pki.rds.amazonaws.com/global/global-bundle.p
 COPY tsconfig.base.json ./
 COPY packages/auth-token packages/auth-token
 COPY packages/game-contract packages/game-contract
-COPY packages/protocol packages/protocol
 COPY apps/game-service apps/game-service
-RUN npm run build --workspace=@battleship/protocol \
-    && npm run build --workspace=@battleship/auth-token \
+RUN npm run build --workspace=@battleship/auth-token \
     && npm run build --workspace=@battleship/game-contract \
     && npm run build --workspace=@battleship/game-service \
     && npm prune --omit=dev
@@ -54,8 +49,6 @@ COPY --from=build /workspace/packages/auth-token/package.json packages/auth-toke
 COPY --from=build /workspace/packages/auth-token/dist packages/auth-token/dist
 COPY --from=build /workspace/packages/game-contract/package.json packages/game-contract/package.json
 COPY --from=build /workspace/packages/game-contract/dist packages/game-contract/dist
-COPY --from=build /workspace/packages/protocol/package.json packages/protocol/package.json
-COPY --from=build /workspace/packages/protocol/dist packages/protocol/dist
 COPY --from=frontend-build /workspace/apps/frontend/dist apps/frontend/dist
 RUN chown -R node:node /workspace
 USER node

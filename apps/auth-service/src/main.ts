@@ -1,7 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { authorizeUser, createLocalTokenVerifier, createToken } from "@battleship/auth-token";
-import { startInternalGrpcServer } from "@battleship/protocol";
 import Database from "better-sqlite3";
 import express from "express";
 
@@ -10,7 +9,6 @@ import * as types from "./types.js";
 const serviceName = process.env.SERVICE_NAME ?? "auth-service";
 const nodeId = process.env.NODE_ID ?? "auth-node-1";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
-const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
 const databasePath = process.env.DATABASE_PATH ?? "/data/auth.db";
 const jwtSecret = process.env.JWT_SECRET;
 if (!jwtSecret) throw new Error("JWT_SECRET is required");
@@ -52,11 +50,6 @@ const deleteUserById = database.prepare<[number]>(
 
 const deleteAllUsers = database.prepare("DELETE FROM users");
 
-const grpcServer = await startInternalGrpcServer(grpcPort, {
-  serviceName,
-  nodeId,
-  isReady: () => ready
-});
 
 const app = express();
 app.use(express.json());
@@ -216,15 +209,13 @@ await new Promise<void>((resolve, reject) => {
 });
 ready = true;
 
-console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} and gRPC ${grpcPort}`);
+console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort}`);
 
 function shutdown(): void {
   ready = false;
   httpServer.close(() => {
-    grpcServer.tryShutdown(() => {
-      database.close();
-      process.exit(0);
-    });
+    database.close();
+    process.exit(0);
   });
 }
 
