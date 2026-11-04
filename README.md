@@ -47,6 +47,24 @@ Show command usage:
 ./setup.sh help
 ```
 
+## Config 2: etcd store
+
+By default the three backend nodes keep games in PostgreSQL (config 1). Config 2 keeps them in a three-node etcd cluster instead, which replicates every write with Raft so the store survives losing any one node:
+
+```sh
+./setup.sh up etcd     # same app at http://localhost:8000, backends on etcd
+./setup.sh down etcd
+```
+
+`compose.etcd.yaml` adds the etcd nodes (data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the cluster and which node is the leader:
+
+```sh
+docker exec battleship-etcd-1 etcdctl \
+  --endpoints=http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379 endpoint status -w table
+```
+
+To try a failover, stop the leader (e.g. `docker kill battleship-etcd-1`), keep playing or run `python scripts/game_bots.py`, then bring it back with `docker start battleship-etcd-1`. Requests in flight while the leader dies can fail with a 503 for about a second; no committed move is lost.
+
 ## Turn timeout
 
 By default, both players share 60 seconds to submit their fleets; the game is cancelled if either player has not submitted in time. Each active turn lasts 30 seconds, with a 500 ms server-side delivery grace period. A player who runs out of time loses the match. To disable the timer for testing, set `DISABLE_TIMEOUT=true` in `.env` before starting development or deploying production. The setting applies to all backend instances; restart the deployment after changing it. Use a fresh database when changing this setting.
@@ -57,7 +75,13 @@ By default, both players share 60 seconds to submit their fleets; the game is ca
 npm test
 ```
 
-Runs the game-service store tests against a throwaway PostgreSQL container (Docker required). The same suite in `apps/game-service/test/store-contract.ts` is meant to run against every store implementation.
+Runs the game-service store tests against throwaway PostgreSQL and etcd containers (Docker required). Both stores run the same suite in `apps/game-service/test/store-contract.ts`.
+
+```sh
+npm run test:failover --workspace=@battleship/game-service
+```
+
+Plays games on a throwaway three-node etcd cluster while repeatedly killing its leader, and checks that no move is lost, applied twice, or reported wrongly. It takes about a minute.
 
 ## Test bots
 
