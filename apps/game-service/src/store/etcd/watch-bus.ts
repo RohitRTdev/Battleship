@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
 import type { IKeyValue, Namespace, Watcher } from "etcd3";
 import type { UpdateBus } from "../game-store.js";
-import { keys } from "./keys.js";
+import type { DataCluster } from "./etcd-store.js";
+import { controlKeys, dataKeys } from "./keys.js";
 
 /** The part of a raw etcd key after `prefix` (raw keys still carry the client's namespace). */
 function after(prefix: string, kv: IKeyValue): string {
@@ -17,25 +18,31 @@ export class EtcdUpdateBus implements UpdateBus {
   private readonly events = new EventEmitter();
   private watchers: Watcher[] = [];
 
-  constructor(private readonly kv: Namespace) {
+  constructor(
+    private readonly control: Namespace,
+    private readonly clusters: DataCluster[]
+  ) {
     this.events.setMaxListeners(0);
   }
 
   async start(): Promise<void> {
-    const games = await this.watch(keys.gamePrefix);
-    games.on("put", (kv) => this.events.emit(`game:${after(keys.gamePrefix, kv).split("/")[0]}`));
-    // A player's state changes when their active game or queue entry is written or removed.
-    for (const prefix of [keys.playerPrefix, keys.queuePrefix]) {
-      const players = await this.watch(prefix);
+    // A player's state changes when their claim or queue entry on the control plane is written or removed.
+    for (const prefix of [controlKeys.playerPrefix, controlKeys.queuePrefix]) {
+      const players = await this.watch(this.control, prefix);
       const wake = (kv: IKeyValue) => this.events.emit(`player:${after(prefix, kv).split("/")[0]}`);
       players.on("put", wake).on("delete", wake);
     }
-    const jobs = await this.watch(keys.archivePrefix);
-    jobs.on("put", (kv) => this.events.emit("archive", after(keys.archivePrefix, kv)));
+    // Games and their archive jobs live on the data clusters.
+    for (const cluster of this.clusters) {
+      const games = await this.watch(cluster.kv, dataKeys.gamePrefix);
+      games.on("put", (kv) => this.events.emit(`game:${after(dataKeys.gamePrefix, kv).split("/")[0]}`));
+      const jobs = await this.watch(cluster.kv, dataKeys.archivePrefix);
+      jobs.on("put", (kv) => this.events.emit("archive", after(dataKeys.archivePrefix, kv)));
+    }
   }
 
-  private async watch(prefix: string): Promise<Watcher> {
-    const watcher = await this.kv.watch().prefix(prefix).create();
+  private async watch(kv: Namespace, prefix: string): Promise<Watcher> {
+    const watcher = await kv.watch().prefix(prefix).create();
     // After a dropped watch, events may have been missed; waking everyone makes them re-read current state.
     watcher.on("disconnected", () => watcher.once("connected", () => this.wakeAll()));
     watcher.on("error", (error) => console.error(`etcd watch on ${prefix} failed`, error));

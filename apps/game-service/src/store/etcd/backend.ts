@@ -2,9 +2,9 @@ import { Etcd3 } from "etcd3";
 import type { StoreBackend, StoreOptions } from "../index.js";
 import { isEtcdUnavailable } from "./errors.js";
 import { EtcdArchiveOutbox } from "./archive-outbox.js";
-import { EtcdStore } from "./etcd-store.js";
+import { EtcdStore, type DataCluster } from "./etcd-store.js";
 import { EtcdUpdateBus } from "./watch-bus.js";
-import { keys, NAMESPACE } from "./keys.js";
+import { CONTROL_NAMESPACE, controlKeys, dataKeys, dataNamespace } from "./keys.js";
 
 const CALL_TIMEOUT_MS = 2_000;
 
@@ -19,19 +19,22 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
     // keep-alives), which would otherwise be cut and re-established every CALL_TIMEOUT_MS.
     defaultCallOptions: (context) => (context.isStream ? {} : { deadline: Date.now() + CALL_TIMEOUT_MS })
   });
-  const kv = client.namespace(NAMESPACE);
-  const updates = new EtcdUpdateBus(kv);
+  // One etcd cluster serves as both the control plane and the single data cluster, under separate namespaces.
+  const control = client.namespace(CONTROL_NAMESPACE);
+  const clusters: DataCluster[] = [{ id: "main", kv: client.namespace(dataNamespace("main")) }];
+  const updates = new EtcdUpdateBus(control, clusters);
   let ready = false;
 
-  // A linearizable read needs a quorum, so it fails while the cluster has no leader.
+  // A linearizable read needs a quorum, so it fails while a cluster has no leader.
   async function probe(): Promise<void> {
-    await kv.get(keys.health).string();
+    await control.get(controlKeys.health).string();
+    await Promise.all(clusters.map((cluster) => cluster.kv.get(dataKeys.health).string()));
   }
 
   return {
-    store: new EtcdStore(kv, options.timeoutEnabled),
+    store: new EtcdStore(control, clusters, options.timeoutEnabled),
     updates,
-    outbox: new EtcdArchiveOutbox(kv, updates),
+    outbox: new EtcdArchiveOutbox(clusters, updates),
 
     async start() {
       while (true) {

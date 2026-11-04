@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { Etcd3 } from "etcd3";
 import { createEtcdBackend } from "../src/store/etcd/backend.js";
-import { keys, NAMESPACE } from "../src/store/etcd/keys.js";
+import { createGame } from "../src/game/index.js";
+import { CONTROL_NAMESPACE, controlKeys, dataKeys as keys, dataNamespace, encode, NAMESPACE } from "../src/store/etcd/keys.js";
+
+/** Namespace of the single data cluster that single-cluster etcd mode uses. */
+const DATA = dataNamespace("main");
 import type { StoreBackend } from "../src/store/index.js";
 import { defineStoreContract } from "./store-contract.js";
 
@@ -52,6 +56,72 @@ describe("etcd store", () => {
     }
   });
 
+  // A crash can split a cross-cluster change: the control-plane half lands, the data-cluster half does not.
+  function newGame(creator: { id: string; username: string }, gameCode: string) {
+    const created = createGame({ type: "CREATE_GAME", gameId: crypto.randomUUID(), gameCode, actor: creator, occurredAt: new Date().toISOString() });
+    assert.ok(created.ok);
+    return created.value.state;
+  }
+  const control = () => admin.namespace(CONTROL_NAMESPACE);
+  const claim = (state: { gameId: string; gameCode: string }, username: string) =>
+    encode({ gameId: state.gameId, gameCode: state.gameCode, clusterId: "main", username });
+
+  test("a creation that never reached its data cluster is completed from its route", async () => {
+    const backend = backendFor(endpoints);
+    await backend.start();
+    try {
+      await admin.namespace(NAMESPACE).delete().all();
+      const creator = { id: "crash-creator", username: "creator" };
+      const state = newGame(creator, "CRASH001");
+      await control().put(controlKeys.route(state.gameCode)).value(encode({ gameId: state.gameId, clusterId: "main", initial: state }));
+      await control().put(controlKeys.gameCluster(state.gameId)).value("main");
+      await control().put(controlKeys.activeGame(creator.id)).value(claim(state, creator.username));
+
+      assert.deepEqual(await backend.store.getPlayerState(creator.id), { state: "PLAYING", gameCode: "CRASH001", gameStatus: "WAITING" });
+      assert.equal(ok(await backend.store.getState("CRASH001")).gameId, state.gameId);
+      assert.ok(await admin.namespace(DATA).get(keys.game(state.gameId)).string(), "the game was written to its data cluster");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a join that never reached its game is completed while the game still waits", async () => {
+    const backend = backendFor(endpoints);
+    await backend.start();
+    try {
+      await admin.namespace(NAMESPACE).delete().all();
+      const creator = { id: "join-creator", username: "creator" };
+      const joiner = { id: "join-joiner", username: "joiner" };
+      const state = ok(await backend.store.create(creator)).state;
+      await control().put(controlKeys.activeGame(joiner.id)).value(claim(state, joiner.username));
+
+      assert.deepEqual(await backend.store.getPlayerState(joiner.id), { state: "PLAYING", gameCode: state.gameCode, gameStatus: "PLACEMENT" });
+      assert.equal(ok(await backend.store.getState(state.gameCode)).playerTwo?.id, joiner.id);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a claim on a game that moved on without the player is released", async () => {
+    const backend = backendFor(endpoints);
+    await backend.start();
+    try {
+      await admin.namespace(NAMESPACE).delete().all();
+      const creator = { id: "stale-creator", username: "creator" };
+      const joiner = { id: "stale-joiner", username: "joiner" };
+      const latecomer = { id: "stale-latecomer", username: "latecomer" };
+      const state = ok(await backend.store.create(creator)).state;
+      ok(await backend.store.command(state.gameCode, joiner, (occurredAt) => ({ type: "JOIN_GAME", actor: joiner, occurredAt })));
+      await control().put(controlKeys.activeGame(latecomer.id)).value(claim(state, latecomer.username));
+
+      assert.deepEqual(await backend.store.getPlayerState(latecomer.id), { state: "NOT_PLAYING" });
+      assert.equal(await control().get(controlKeys.activeGame(latecomer.id)).string(), null);
+      assert.equal(ok(await backend.store.create(latecomer)).state.playerOne.id, latecomer.id);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("presence turns LAGGING after 10 s and is dropped when the game finishes", async () => {
     const backend = backendFor(endpoints);
     await backend.start();
@@ -62,12 +132,12 @@ describe("etcd store", () => {
       const created = ok(await backend.store.create(first)).state;
       ok(await backend.store.command(created.gameCode, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
       const state = ok(await backend.store.getState(created.gameCode));
-      await admin.namespace(NAMESPACE).put(keys.presence(state.gameId, first.id)).value(new Date(Date.now() - 11_000).toISOString());
+      await admin.namespace(DATA).put(keys.presence(state.gameId, first.id)).value(new Date(Date.now() - 11_000).toISOString());
       await backend.store.touchPresence(state.gameId, second.id);
       assert.deepEqual(await backend.store.presence(state.gameId, state), { [first.id]: "LAGGING", [second.id]: "CONNECTED" });
 
       ok(await backend.store.command(created.gameCode, second, (occurredAt) => ({ type: "CANCEL_GAME", actor: second, occurredAt })));
-      assert.deepEqual(await admin.namespace(NAMESPACE).getAll().prefix(keys.presencePrefix(state.gameId)).keys(), []);
+      assert.deepEqual(await admin.namespace(DATA).getAll().prefix(keys.presencePrefix(state.gameId)).keys(), []);
     } finally {
       await backend.close();
     }
@@ -113,7 +183,7 @@ describe("etcd store", () => {
       await admin.namespace(NAMESPACE).delete().all();
       const gameId = await finishedGame(backend, "crashed");
       // A claim whose lease nobody renews, as if its node died mid-archive.
-      const orphan = admin.namespace(NAMESPACE).lease(2, { autoKeepAlive: false });
+      const orphan = admin.namespace(DATA).lease(2, { autoKeepAlive: false });
       await orphan.put(keys.archiveClaim(gameId)).value("");
       assert.equal((await backend.outbox.processNext(async () => assert.fail("claimed job processed"))).kind, "empty");
       await new Promise((resolve) => setTimeout(resolve, 3_500));
