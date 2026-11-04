@@ -105,7 +105,7 @@ Then run either one interactive bot or the concurrent game checks:
 python scripts/play_bot.py --prod
 python scripts/game_bots.py --prod
 ```
-Use play_bot.py to let a bot start a game. You may then join the game using the printed game code.
+Use `play_bot.py` to let a bot start a game. You may then join the game using the printed game code.
 
 You may check the script doc to see what each one does<br>
 For Example: Run authentication smoke test
