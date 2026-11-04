@@ -15,7 +15,9 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
   const client = new Etcd3({
     hosts: endpoints,
     dialTimeout: CALL_TIMEOUT_MS,
-    defaultCallOptions: () => ({ deadline: Date.now() + CALL_TIMEOUT_MS })
+    // Deadlines fail fast when etcd is unreachable, but must not apply to long-lived streams (watches, lease
+    // keep-alives), which would otherwise be cut and re-established every CALL_TIMEOUT_MS.
+    defaultCallOptions: (context) => (context.isStream ? {} : { deadline: Date.now() + CALL_TIMEOUT_MS })
   });
   const kv = client.namespace(NAMESPACE);
   const updates = new EtcdUpdateBus(kv);

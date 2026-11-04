@@ -140,6 +140,24 @@ describe("etcd backend", () => {
     }
   });
 
+  test("watches stay connected, so idle listeners are not woken", async () => {
+    // Call deadlines once applied to the watch stream too, cutting it every 2 s and waking every listener.
+    const backend = backendFor(endpoints);
+    await backend.start();
+    let wakes = 0;
+    const listener = () => { wakes += 1; };
+    try {
+      backend.updates.on("idle-game", listener);
+      backend.updates.onPlayer("idle-player", listener);
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      assert.equal(wakes, 0);
+    } finally {
+      backend.updates.off("idle-game", listener);
+      backend.updates.offPlayer("idle-player", listener);
+      await backend.close();
+    }
+  });
+
   test("reports unhealthy within a few seconds when etcd is unreachable", async () => {
     const started = Date.now();
     assert.equal(await unreachable.checkHealth(), false);
