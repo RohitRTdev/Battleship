@@ -149,6 +149,8 @@ usage() {
   echo "Usage:"
   echo "  ./setup.sh up          Start development at localhost:8000"
   echo "  ./setup.sh down        Stop development"
+  echo "  ./setup.sh up etcd     Start development with the etcd store (config 2)"
+  echo "  ./setup.sh down etcd   Stop the etcd development environment"
   echo "  ./setup.sh up prod     Build and deploy to AWS"
   echo "  ./setup.sh down prod   Permanently delete the AWS deployment"
   echo "  ./setup.sh reset       Delete generated development data"
@@ -159,6 +161,8 @@ environment=${2:-dev}
 case "$command:$environment" in
   up:dev) up_dev ;;
   down:dev) down_dev ;;
+  up:etcd) export COMPOSE_FILE=compose.yaml:compose.etcd.yaml; up_dev ;;
+  down:etcd) export COMPOSE_FILE=compose.yaml:compose.etcd.yaml; down_dev ;;
   up:prod) up_prod ;;
   down:prod) down_prod ;;
   reset:dev) reset_dev ;;

@@ -1,5 +1,6 @@
-# Three-node etcd cluster for the etcd store (config 2). Use together with compose.yaml:
-#   docker compose -f compose.yaml -f compose.etcd.yaml up --detach --wait
+# Config 2: a three-node etcd cluster, with the backends storing games in it instead of PostgreSQL.
+# Use together with compose.yaml, e.g. `./setup.sh up etcd`, which runs
+#   COMPOSE_FILE=compose.yaml:compose.etcd.yaml docker compose up --build --detach --wait
 
 x-etcd-environment: &etcd-environment
   ETCD_DATA_DIR: /var/lib/etcd
@@ -27,7 +28,23 @@ x-etcd-common: &etcd-common
     retries: 20
     start_period: 10s
 
+x-etcd-backend: &etcd-backend
+  environment:
+    STORE_MODE: etcd
+    ETCD_ENDPOINTS: etcd-1:2379,etcd-2:2379,etcd-3:2379
+  depends_on:
+    etcd-1:
+      condition: service_healthy
+    etcd-2:
+      condition: service_healthy
+    etcd-3:
+      condition: service_healthy
+
 services:
+  backend-node-1: *etcd-backend
+  backend-node-2: *etcd-backend
+  backend-node-3: *etcd-backend
+
   etcd-1:
     <<: *etcd-common
     container_name: battleship-etcd-1
