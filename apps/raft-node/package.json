@@ -12,7 +12,6 @@
     "@aws-sdk/client-s3": "^3.1161.0",
     "@battleship/auth-token": "*",
     "@battleship/game-contract": "*",
-    "@battleship/protocol": "*",
     "express": "^5.3.0",
     "pg": "^8.16.3"
   },

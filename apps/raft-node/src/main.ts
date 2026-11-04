@@ -1,5 +1,4 @@
 import { authorizeUser, createTokenVerifierFromEnvironment } from "@battleship/auth-token";
-import { startInternalGrpcServer } from "@battleship/protocol";
 import express from "express";
 import path from "node:path";
 import { Pool } from "pg";
@@ -13,7 +12,6 @@ import { ArchiveWorker } from "./archive/archive-worker.js";
 const serviceName = process.env.SERVICE_NAME ?? "raft-backend";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
-const grpcPort = Number(process.env.GRPC_PORT ?? 9090);
 const databaseUrl = process.env.DATABASE_URL;
 const tokenVerifier = await createTokenVerifierFromEnvironment();
 const production = process.env.APP_ENV === "prod";
@@ -60,6 +58,10 @@ async function initializeDatabase(): Promise<void> {
   while (true) {
     try {
       await database.query("SELECT 1");
+      const res = await database.query("SHOW max_connections");
+      if (res) {
+        console.log(`PostgreSQL max_connections: ${res.rows[0].max_connections}`);
+      }
       const migrationClient = await database.connect();
       try {
         await runMigrations(migrationClient);
@@ -81,12 +83,6 @@ async function initializeDatabase(): Promise<void> {
 }
 
 await initializeDatabase();
-
-const grpcServer = await startInternalGrpcServer(grpcPort, {
-  serviceName,
-  nodeId,
-  isReady: () => ready && databaseReady
-});
 
 const app = express();
 app.disable("etag");
@@ -152,7 +148,7 @@ await new Promise<void>((resolve, reject) => {
 });
 ready = true;
 
-console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} and gRPC ${grpcPort}`);
+console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort}`);
 
 function shutdown(): void {
   if (shuttingDown) {
@@ -163,13 +159,11 @@ function shutdown(): void {
   ready = false;
   databaseReady = false;
   httpServer.close(() => {
-    grpcServer.tryShutdown(() => {
-      timeoutWorkerClosed = true;
-      if (timeoutTimer) clearInterval(timeoutTimer);
-      archiveWorker.close();
-      updates.close();
-      void database.end().finally(() => process.exit(0));
-    });
+    timeoutWorkerClosed = true;
+    if (timeoutTimer) clearInterval(timeoutTimer);
+    archiveWorker.close();
+    updates.close();
+    void database.end().finally(() => process.exit(0));
   });
 }
 

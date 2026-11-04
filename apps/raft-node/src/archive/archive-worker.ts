@@ -32,7 +32,10 @@ export class ArchiveWorker {
       this.rerun = true;
       return;
     }
-    void this.drain();
+    void this.drain().catch((error) => {
+      console.error("Unexpected match archive worker error", error);
+      this.scheduleRetry(1_000);
+    });
   }
 
   private async drain(): Promise<void> {
@@ -51,7 +54,14 @@ export class ArchiveWorker {
   }
 
   private async processOne(): Promise<boolean> {
-    const client = await this.pool.connect();
+    let client;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      console.error("Match archive worker database connection error", error);
+      this.scheduleRetry(1_000);
+      return false;
+    }
     try {
       await client.query("BEGIN");
       const result = await client.query<ArchiveJobRow>(
