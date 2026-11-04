@@ -97,9 +97,9 @@ async function killLeaders(kills: Kill[]): Promise<void> {
 /** Plays one game between `first` and `second`, firing until it ends; returns the attempts and the final state. */
 async function playGame(store: GameStore, first: Player, second: Player, isUnavailable: (error: unknown) => boolean) {
   const code = ok(await untilAvailable(() => store.create(first))).state.gameCode;
-  ok(await untilAvailable(() => store.command(code, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt }))));
+  ok(await untilAvailable(() => store.command(code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt }))));
   for (const player of [first, second]) {
-    ok(await untilAvailable(() => store.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: FLEET, occurredAt }))));
+    ok(await untilAvailable(() => store.command(code, player, (occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: FLEET, occurredAt }))));
   }
   const attempts: Attempt[] = [];
   while (true) {
@@ -112,7 +112,7 @@ async function playGame(store: GameStore, first: Player, second: Player, isUnava
     const sentAt = Date.now();
     let outcome: string;
     try {
-      const result = await store.command(code, mover, (_state, occurredAt) => ({ type: "FIRE", actor: mover, coordinate, occurredAt }));
+      const result = await store.command(code, mover, (occurredAt) => ({ type: "FIRE", actor: mover, coordinate, occurredAt }));
       outcome = result.ok ? "ok" : result.error.code;
     } catch (error) {
       outcome = isUnavailable(error) ? "unavailable" : `threw ${String(error)}`;

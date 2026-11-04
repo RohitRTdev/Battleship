@@ -171,7 +171,7 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
   router.post("/games/:gameCode/join", async (request, response) => {
     const code = gameCode(request, response); if (!code) return;
     const player = actor(request);
-    const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: player, occurredAt }));
+    const result = await repository.command(code, player, (occurredAt) => ({ type: "JOIN_GAME", actor: player, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
     await sendGame(response, repository, result.value.state, player.id);
   });
@@ -181,7 +181,7 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
     const ships = fleet(request.body);
     if (!ships) return sendError(response, domainError("INVALID_REQUEST"));
     const player = actor(request);
-    const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships, occurredAt }));
+    const result = await repository.command(code, player, (occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
     await sendGame(response, repository, result.value.state, player.id);
   });
@@ -191,7 +191,7 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
     const shot = coordinate(request.body?.coordinate);
     if (!shot) return sendError(response, domainError("INVALID_REQUEST"));
     const player = actor(request);
-    const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "FIRE", actor: player, coordinate: shot, occurredAt }));
+    const result = await repository.command(code, player, (occurredAt) => ({ type: "FIRE", actor: player, coordinate: shot, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
     const view = await viewFor(repository, result.value.state, player.id);
     if (!view.ok) return sendError(response, view.error);
@@ -204,7 +204,7 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
     router.post(`/games/:gameCode/${action}`, async (request, response) => {
       const code = gameCode(request, response); if (!code) return;
       const player = actor(request);
-      const result = await repository.command(code, player, (_state, occurredAt) => ({
+      const result = await repository.command(code, player, (occurredAt) => ({
         type: action === "cancel" ? "CANCEL_GAME" : "SURRENDER",
         actor: player,
         occurredAt

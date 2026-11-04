@@ -99,7 +99,7 @@ export class EtcdStore implements GameStore {
   async command(
     gameCode: string,
     actor: Player,
-    buildCommand: (state: GameState, occurredAt: string) => GameCommand
+    buildCommand: (occurredAt: string) => GameCommand
   ): Promise<Result<CommandResult>> {
     for (let attempt = 0; attempt < COMMAND_ATTEMPTS; attempt += 1) {
       if (attempt > 0) await backoff(attempt);
@@ -108,7 +108,7 @@ export class EtcdStore implements GameStore {
       if (!game) return failed("GAME_NOT_FOUND");
 
       const now = await this.currentTime();
-      const requested = buildCommand(game.state, now);
+      const requested = buildCommand(now);
       const late = lateMoveTimeout(game.state, requested, now);
       const command = late?.timeout ?? requested;
       const applied = applyGameCommand(game.state, command);

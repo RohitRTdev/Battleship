@@ -40,15 +40,15 @@ function errorCode(result: { ok: boolean; error?: { code: string } }): string | 
   return result.ok ? undefined : result.error?.code;
 }
 
-type Build = (state: GameState, occurredAt: string) => GameCommand;
-const join = (actor: Player): Build => (_state, occurredAt) => ({ type: "JOIN_GAME", actor, occurredAt });
-const place = (actor: Player): Build => (_state, occurredAt) => ({ type: "PLACE_FLEET", actor, ships: FLEET, occurredAt });
-const fire = (actor: Player, coordinate: Coordinate): Build => (_state, occurredAt) => ({ type: "FIRE", actor, coordinate, occurredAt });
-const cancel = (actor: Player): Build => (_state, occurredAt) => ({ type: "CANCEL_GAME", actor, occurredAt });
+type Build = (occurredAt: string) => GameCommand;
+const join = (actor: Player): Build => (occurredAt) => ({ type: "JOIN_GAME", actor, occurredAt });
+const place = (actor: Player): Build => (occurredAt) => ({ type: "PLACE_FLEET", actor, ships: FLEET, occurredAt });
+const fire = (actor: Player, coordinate: Coordinate): Build => (occurredAt) => ({ type: "FIRE", actor, coordinate, occurredAt });
+const cancel = (actor: Player): Build => (occurredAt) => ({ type: "CANCEL_GAME", actor, occurredAt });
 /** Places the fleet as if 40 s ago, so the turn deadline it starts (30 s) has already passed. */
-const placeLongAgo = (actor: Player): Build => (_state, occurredAt) =>
+const placeLongAgo = (actor: Player): Build => (occurredAt) =>
   ({ type: "PLACE_FLEET", actor, ships: FLEET, occurredAt: new Date(Date.parse(occurredAt) - 40_000).toISOString() });
-const surrender = (actor: Player): Build => (_state, occurredAt) => ({ type: "SURRENDER", actor, occurredAt });
+const surrender = (actor: Player): Build => (occurredAt) => ({ type: "SURRENDER", actor, occurredAt });
 
 async function activeGame(store: GameStore): Promise<{ code: string; first: Player; second: Player; state: GameState }> {
   const first = player();

@@ -60,13 +60,13 @@ describe("etcd store", () => {
       const first = { id: "presence-first", username: "first" };
       const second = { id: "presence-second", username: "second" };
       const created = ok(await backend.store.create(first)).state;
-      ok(await backend.store.command(created.gameCode, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+      ok(await backend.store.command(created.gameCode, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
       const state = ok(await backend.store.getState(created.gameCode));
       await admin.namespace(NAMESPACE).put(keys.presence(state.gameId, first.id)).value(new Date(Date.now() - 11_000).toISOString());
       await backend.store.touchPresence(state.gameId, second.id);
       assert.deepEqual(await backend.store.presence(state.gameId, state), { [first.id]: "LAGGING", [second.id]: "CONNECTED" });
 
-      ok(await backend.store.command(created.gameCode, second, (_state, occurredAt) => ({ type: "CANCEL_GAME", actor: second, occurredAt })));
+      ok(await backend.store.command(created.gameCode, second, (occurredAt) => ({ type: "CANCEL_GAME", actor: second, occurredAt })));
       assert.deepEqual(await admin.namespace(NAMESPACE).getAll().prefix(keys.presencePrefix(state.gameId)).keys(), []);
     } finally {
       await backend.close();
@@ -77,14 +77,14 @@ describe("etcd store", () => {
     const first = { id: `${tag}-first`, username: "first" };
     const second = { id: `${tag}-second`, username: "second" };
     const code = ok(await backend.store.create(first)).state.gameCode;
-    ok(await backend.store.command(code, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+    ok(await backend.store.command(code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
     for (const player of [first, second]) {
-      ok(await backend.store.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: [
+      ok(await backend.store.command(code, player, (occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: [
         { start: { row: 0, column: 0 }, end: { row: 0, column: 4 } }, { start: { row: 2, column: 0 }, end: { row: 2, column: 3 } },
         { start: { row: 4, column: 0 }, end: { row: 4, column: 2 } }, { start: { row: 6, column: 0 }, end: { row: 6, column: 2 } },
         { start: { row: 8, column: 0 }, end: { row: 8, column: 1 } }], occurredAt })));
     }
-    return ok(await backend.store.command(code, second, (_state, occurredAt) => ({ type: "SURRENDER", actor: second, occurredAt }))).state.gameId;
+    return ok(await backend.store.command(code, second, (occurredAt) => ({ type: "SURRENDER", actor: second, occurredAt }))).state.gameId;
   }
 
   test("two nodes never archive the same game at the same time", async () => {

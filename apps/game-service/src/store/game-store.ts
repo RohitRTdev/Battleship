@@ -9,13 +9,13 @@ export interface GameStore {
   currentTime(): Promise<string>;
   create(actor: Player): Promise<Result<CommandResult>>;
   /**
-   * Applies a command to the game with the given code atomically. `buildCommand` receives the current
-   * state and the time from `currentTime`.
+   * Applies a command to the game with the given code atomically. `buildCommand` receives the time from
+   * `currentTime`.
    */
   command(
     gameCode: string,
     actor: Player,
-    buildCommand: (state: GameState, occurredAt: string) => GameCommand
+    buildCommand: (occurredAt: string) => GameCommand
   ): Promise<Result<CommandResult>>;
   getState(gameCode: string): Promise<Result<GameState>>;
   getPlayerState(playerId: string): Promise<PlayerStateResponse>;

@@ -205,7 +205,7 @@ export class GameRepository implements GameStore {
   async command(
     gameCode: string,
     actor: Player,
-    buildCommand: (state: GameState, occurredAt: string) => GameCommand
+    buildCommand: (occurredAt: string) => GameCommand
   ): Promise<Result<CommandResult>> {
     const client = await this.pool.connect();
     try {
@@ -222,7 +222,7 @@ export class GameRepository implements GameStore {
       }
       const state = await loadState(client, game.rows[0].id);
       const now = await databaseTime(client);
-      const command = buildCommand(state, now);
+      const command = buildCommand(now);
       const late = lateMoveTimeout(state, command, now);
       if (late) {
         const timeout = applyGameCommand(state, late.timeout);
