@@ -131,7 +131,9 @@ export class EtcdStore implements GameStore {
     let claimed = false;
     for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
       if (attempt > 0) await backoff(attempt);
-      if (await this.control.get(controlKeys.queueEntry(actor.id)).string()) return failed("PLAYER_ALREADY_SEARCHING");
+      // No control-plane read here, so games in progress keep working while the control plane is down. A queued
+      // player cannot move in a game: only participants can, and joining the queue needs no game in progress. Joins
+      // check the queue in their claim (claimForJoin).
       const game = await this.loadGame(route);
 
       const now = await this.currentTime();

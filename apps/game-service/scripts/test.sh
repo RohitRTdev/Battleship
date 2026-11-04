@@ -31,5 +31,6 @@ done
 TEST_DATABASE_URL="postgresql://test:test@127.0.0.1:$(port "$postgres" 5432)/test" \
 TEST_ETCD_ENDPOINTS="127.0.0.1:$(port "$etcd" 2379)" \
 TEST_ETCD_CONTROL="127.0.0.1:$(port "$control" 2379)" \
+TEST_ETCD_CONTROL_CONTAINER="$control" \
 TEST_ETCD_DATA_CLUSTERS="a=127.0.0.1:$(port "$data_a" 2379);b=127.0.0.1:$(port "$data_b" 2379)" \
   npx tsx --test "$@" test/*.test.ts

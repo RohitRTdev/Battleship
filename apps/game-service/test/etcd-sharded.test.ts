@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { after, describe, test } from "node:test";
+import { promisify } from "node:util";
 import { Etcd3 } from "etcd3";
 import { createEtcdBackend } from "../src/store/etcd/backend.js";
-import { createGame } from "../src/game/index.js";
+import { createGame, type GameCommand, type Player } from "../src/game/index.js";
 import { CONTROL_NAMESPACE, controlKeys, dataKeys, dataNamespace, encode, NAMESPACE } from "../src/store/etcd/keys.js";
 import type { StoreBackend } from "../src/store/index.js";
 import { defineStoreContract } from "./store-contract.js";
@@ -85,6 +87,43 @@ describe("etcd data clusters", () => {
       assert.deepEqual(await node.store.getPlayerState(player.id), { state: "NOT_PLAYING" });
       assert.equal(ok(await node.store.create(player)).state.playerOne.id, player.id);
     } finally {
+      await node.close();
+    }
+  });
+
+  test("games in progress keep going while the control plane is down", { timeout: 60_000 }, async () => {
+    const container = process.env.TEST_ETCD_CONTROL_CONTAINER;
+    assert.ok(container, "TEST_ETCD_CONTROL_CONTAINER is required");
+    const docker = (...args: string[]) => promisify(execFile)("docker", args);
+    const node = shardedBackend();
+    await node.start();
+    const first: Player = { id: "outage-first", username: "first" };
+    const second: Player = { id: "outage-second", username: "second" };
+    const ships = [
+      { start: { row: 0, column: 0 }, end: { row: 0, column: 4 } }, { start: { row: 2, column: 0 }, end: { row: 2, column: 3 } },
+      { start: { row: 4, column: 0 }, end: { row: 4, column: 2 } }, { start: { row: 6, column: 0 }, end: { row: 6, column: 2 } },
+      { start: { row: 8, column: 0 }, end: { row: 8, column: 1 } }];
+    const play = (code: string, actor: Player, build: (occurredAt: string) => GameCommand) => node.store.command(code, actor, build);
+    let paused = false;
+    try {
+      await Promise.all(admins.map((admin) => admin.namespace(NAMESPACE).delete().all()));
+      const code = ok(await node.store.create(first)).state.gameCode;
+      ok(await play(code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+      for (const player of [first, second]) ok(await play(code, player, (occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships, occurredAt })));
+
+      await docker("pause", container);
+      paused = true;
+      assert.equal(await node.checkHealth(), false, "the control plane should be unreachable");
+      // Both players keep firing; their game's data cluster is still up.
+      for (let column = 0; column < 4; column += 1) {
+        ok(await play(code, first, (occurredAt) => ({ type: "FIRE", actor: first, coordinate: { row: 0, column }, occurredAt })));
+        ok(await play(code, second, (occurredAt) => ({ type: "FIRE", actor: second, coordinate: { row: 9, column }, occurredAt })));
+      }
+      const state = ok(await node.store.getState(code));
+      assert.equal(state.attacks.length, 8);
+      assert.equal(state.status, "ACTIVE");
+    } finally {
+      if (paused) await docker("unpause", container);
       await node.close();
     }
   });
