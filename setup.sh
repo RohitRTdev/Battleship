@@ -157,14 +157,17 @@ usage() {
   echo "  ./setup.sh down prod   Permanently delete the AWS deployment"
   echo "  ./setup.sh up prod etcd     Deploy to AWS with the etcd store (config 2)"
   echo "  ./setup.sh down prod etcd   Permanently delete the etcd AWS deployment"
+  echo "  ./setup.sh up prod etcd-sharded     Deploy config 2 sharded: a control plane and two data clusters"
+  echo "  ./setup.sh down prod etcd-sharded   Permanently delete the sharded AWS deployment"
   echo "  ./setup.sh reset       Delete generated development data"
 }
 
 command=${1:-help}
 environment=${2:-dev}
-# Store for the AWS deployment: postgres (config 1, RDS) or etcd (config 2, three EC2 nodes).
+# Store for the AWS deployment: postgres (config 1, RDS), etcd (config 2, one three-node etcd cluster) or
+# etcd-sharded (config 2 with a control-plane cluster plus two data clusters: nine EC2 nodes).
 store_mode=${3:-postgres}
-case "$store_mode" in postgres | etcd) ;; *) usage >&2; exit 1 ;; esac
+case "$store_mode" in postgres | etcd | etcd-sharded) ;; *) usage >&2; exit 1 ;; esac
 case "$command:$environment" in
   up:dev) up_dev ;;
   down:dev) down_dev ;;

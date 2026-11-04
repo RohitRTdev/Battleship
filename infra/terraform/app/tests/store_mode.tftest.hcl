@@ -64,8 +64,70 @@ run "etcd_mode" {
   }
 }
 
+run "etcd_mode_keeps_its_node_identities" {
+  command = apply
+  variables { store_mode = "etcd" }
+  # Same member names, IPs and cluster token as before the sharded layout existed, so the moved blocks reuse the nodes.
+  assert {
+    condition     = keys(aws_instance.etcd) == ["main-1", "main-2", "main-3"]
+    error_message = "the single cluster's nodes should be main-1..3"
+  }
+  assert {
+    condition = strcontains(aws_instance.etcd["main-1"].user_data, "--name etcd-1 ") && strcontains(aws_instance.etcd["main-1"].user_data,
+    "--initial-cluster etcd-1=http://10.42.20.10:2380,etcd-2=http://10.42.21.10:2380,etcd-3=http://10.42.22.10:2380 --initial-cluster-state new --initial-cluster-token battleship-test-etcd ")
+    error_message = "the single cluster's boot script changed"
+  }
+}
+
+run "etcd_sharded_mode" {
+  command = apply
+  variables { store_mode = "etcd-sharded" }
+  assert {
+    condition     = length(aws_db_instance.main) == 0 && length(aws_instance.etcd) == 9
+    error_message = "etcd-sharded mode should create a control plane and two data clusters of three nodes each, and no RDS"
+  }
+  assert {
+    condition = { for key, node in aws_instance.etcd : key => node.private_ip } == {
+      "control-1" = "10.42.20.10", "control-2" = "10.42.21.10", "control-3" = "10.42.22.10",
+      "a-1"       = "10.42.20.11", "a-2" = "10.42.21.11", "a-3" = "10.42.22.11",
+      "b-1"       = "10.42.20.12", "b-2" = "10.42.21.12", "b-3" = "10.42.22.12"
+    }
+    error_message = "each cluster should take one IP per etcd subnet"
+  }
+  assert {
+    condition = strcontains(aws_instance.etcd["a-2"].user_data,
+    "--initial-cluster a-1=http://10.42.20.11:2380,a-2=http://10.42.21.11:2380,a-3=http://10.42.22.11:2380 --initial-cluster-state new --initial-cluster-token battleship-test-etcd-a ")
+    error_message = "a data cluster's nodes should form their own cluster"
+  }
+  assert {
+    condition = alltrue([
+      strcontains(aws_ecs_task_definition.backend.container_definitions, "\"name\":\"STORE_MODE\",\"value\":\"etcd\""),
+      strcontains(aws_ecs_task_definition.backend.container_definitions, "10.42.20.10:2379,10.42.21.10:2379,10.42.22.10:2379"),
+      strcontains(aws_ecs_task_definition.backend.container_definitions, "a=10.42.20.11:2379,10.42.21.11:2379,10.42.22.11:2379;b=10.42.20.12:2379,10.42.21.12:2379,10.42.22.12:2379"),
+      !strcontains(aws_ecs_task_definition.backend.container_definitions, "PGHOST")
+    ])
+    error_message = "the backend should get STORE_MODE=etcd, the control plane and both data clusters"
+  }
+  assert {
+    condition     = aws_ecs_service.backend.enable_execute_command
+    error_message = "ECS Exec should be on, so the cluster CLI can run in a task"
+  }
+}
+
+run "etcd_sharded_mode_with_three_data_clusters" {
+  command = plan
+  variables {
+    store_mode              = "etcd-sharded"
+    etcd_data_cluster_count = 3
+  }
+  assert {
+    condition     = length(aws_instance.etcd) == 12 && contains(keys(aws_instance.etcd), "c-3")
+    error_message = "three data clusters should add c-1..3"
+  }
+}
+
 run "rejects_unknown_mode" {
-  command         = plan
+  command = plan
   variables { store_mode = "valkey" }
   expect_failures = [var.store_mode]
 }

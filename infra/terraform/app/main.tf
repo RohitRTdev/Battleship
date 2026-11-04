@@ -219,6 +219,18 @@ resource "aws_iam_role" "task" {
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "ecs-tasks.amazonaws.com" }, Action = "sts:AssumeRole" }] })
   tags               = local.tags
 }
+# ECS Exec (enable_execute_command on the service) talks to the task through SSM's message channels.
+resource "aws_iam_role_policy" "exec" {
+  role = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel", "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"]
+      Resource = "*"
+    }]
+  })
+}
 resource "aws_iam_role_policy" "match_archive" {
   role = aws_iam_role.task.id
   policy = jsonencode({
@@ -254,12 +266,15 @@ resource "aws_ecs_task_definition" "backend" {
       { name = "APP_ENV", value = "prod" }, { name = "DISABLE_TIMEOUT", value = tostring(var.disable_timeout) }, { name = "HTTP_PORT", value = "8080" },
       { name = "AWS_REGION", value = var.aws_region }, { name = "COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.main.id },
       { name = "COGNITO_APP_CLIENT_ID", value = aws_cognito_user_pool_client.web.id }, { name = "MATCH_ARCHIVE_BUCKET", value = aws_s3_bucket.match_archive.id },
-      { name = "STORE_MODE", value = var.store_mode }
+      { name = "STORE_MODE", value = local.postgres_enabled ? "postgres" : "etcd" }
       ], local.postgres_enabled ? [
       { name = "PGHOST", value = aws_db_instance.main[0].address }, { name = "PGPORT", value = tostring(aws_db_instance.main[0].port) },
       { name = "PGDATABASE", value = "battleship" }, { name = "PGUSER", value = "battleship" }, { name = "PGSSLMODE", value = "verify-full" }
       ] : [
-      { name = "ETCD_ENDPOINTS", value = join(",", [for ip in local.etcd_ips : "${ip}:2379"]) }
+      { name = "ETCD_ENDPOINTS", value = local.etcd_control_endpoints }
+      ], local.etcd_sharded ? [
+      { name = "ETCD_DATA_CLUSTERS", value = local.etcd_data_clusters }
+      ] : [
     ]),
     secrets          = local.postgres_enabled ? [{ name = "PGPASSWORD", valueFrom = "${aws_db_instance.main[0].master_user_secret[0].secret_arn}:password::" }] : [],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.backend.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "backend" } },
@@ -302,12 +317,14 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_ecs_service" "backend" {
-  name                  = "backend"
-  cluster               = aws_ecs_cluster.main.id
-  task_definition       = aws_ecs_task_definition.backend.arn
-  desired_count         = 1
-  launch_type           = "FARGATE"
-  wait_for_steady_state = true
+  name            = "backend"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.backend.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+  # Lets `aws ecs execute-command` open a shell in a task, e.g. to run the etcd cluster CLI.
+  enable_execute_command = true
+  wait_for_steady_state  = true
   network_configuration {
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.backend.id]

@@ -69,7 +69,13 @@ cli activate b                             # undo a drain
 cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
 ```
 
-To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager.
+To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager. `./setup.sh up prod etcd-sharded` deploys the sharded layout instead: a control-plane cluster and two data clusters (nine EC2 nodes; set `etcd_data_cluster_count` for more). On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
+
+```sh
+task=$(aws ecs list-tasks --cluster battleship-prod --query 'taskArns[0]' --output text)
+aws ecs execute-command --cluster battleship-prod --task "$task" --container backend --interactive \
+  --command "node apps/game-service/dist/cli/clusters.js list"
+```
 
 `compose.etcd.yaml` adds the etcd nodes (data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the cluster and which node is the leader:
 
