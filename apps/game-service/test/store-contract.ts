@@ -12,8 +12,6 @@ export type StoreHarness = {
   reset(): Promise<void>;
   /** Called once after all tests, after the backend is closed. */
   dispose?(): Promise<void>;
-  /** Names of tests this store does not support yet; they run as todo and cannot fail the suite. */
-  pending?: string[];
 };
 
 const FLEET: ShipPlacement[] = [
@@ -64,13 +62,6 @@ async function activeGame(store: GameStore): Promise<{ code: string; first: Play
 
 /** Behaviour every GameStore implementation must share. */
 export function defineStoreContract(name: string, harness: StoreHarness): void {
-  const pending = new Set(harness.pending ?? []);
-  const defined = new Set<string>();
-  const it = (title: string, body: () => Promise<void>) => {
-    defined.add(title);
-    test(title, pending.has(title) ? { todo: "not implemented in this store yet" } : {}, body);
-  };
-
   describe(`${name} store contract`, () => {
     let backend: StoreBackend;
     let store: GameStore;
@@ -85,7 +76,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       await harness.dispose?.();
     });
 
-    it("create makes a waiting game owned by its creator", async () => {
+    test("create makes a waiting game owned by its creator", async () => {
       const creator = player();
       const { state } = ok(await store.create(creator));
       assert.equal(state.status, "WAITING");
@@ -95,7 +86,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.deepEqual(await store.getPlayerState(creator.id), { state: "PLAYING", gameCode: state.gameCode, gameStatus: "WAITING" });
     });
 
-    it("a player can be in only one active game", async () => {
+    test("a player can be in only one active game", async () => {
       const creator = player();
       ok(await store.create(creator));
       assert.equal(errorCode(await store.create(creator)), "PLAYER_ALREADY_PLAYING");
@@ -105,7 +96,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(errorCode(await store.command(otherCode, creator, join(creator))), "PLAYER_ALREADY_PLAYING");
     });
 
-    it("commands are validated against the stored state", async () => {
+    test("commands are validated against the stored state", async () => {
       assert.equal(errorCode(await store.getState("ZZZZZZZZ")), "GAME_NOT_FOUND");
       const { code, first, second } = await activeGame(store);
       const outsider = player();
@@ -116,7 +107,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(errorCode(await store.command(code, first, fire(first, { row: 0, column: 0 }))), "COORDINATE_ALREADY_ATTACKED");
     });
 
-    it("a full game finishes once and frees both players", async () => {
+    test("a full game finishes once and frees both players", async () => {
       const { code, first, second } = await activeGame(store);
       let last: CommandResult | undefined;
       for (const [index, target] of FLEET_CELLS.entries()) {
@@ -134,7 +125,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       ok(await store.create(first));
     });
 
-    it("a finished game queues exactly one archive job", async () => {
+    test("a finished game queues exactly one archive job", async () => {
       const { code, second } = await activeGame(store);
       const finished = ok(await store.command(code, second, surrender(second))).state;
       const archived: GameState[] = [];
@@ -146,7 +137,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal((await backend.outbox.processNext(async () => assert.fail("job archived twice"))).kind, "empty");
     });
 
-    it("a failed archive write is retried later instead of being lost", async () => {
+    test("a failed archive write is retried later instead of being lost", async () => {
       const { code, second } = await activeGame(store);
       ok(await store.command(code, second, surrender(second)));
       const failed = await backend.outbox.processNext(async () => { throw new Error("archive unavailable"); });
@@ -155,7 +146,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal((await backend.outbox.processNext(async () => assert.fail("retried before its backoff"))).kind, "empty");
     });
 
-    it("cancelling a game in placement frees both players", async () => {
+    test("cancelling a game in placement frees both players", async () => {
       const first = player();
       const second = player();
       const code = ok(await store.create(first)).state.gameCode;
@@ -166,7 +157,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal((await backend.outbox.processNext(async () => assert.fail("cancelled games are not archived"))).kind, "empty");
     });
 
-    it("concurrent attacks on one turn commit exactly one move", async () => {
+    test("concurrent attacks on one turn commit exactly one move", async () => {
       const { code, first, state } = await activeGame(store);
       const results = await Promise.all(Array.from({ length: 5 }, (_, column) => store.command(code, first, fire(first, { row: 1, column }))));
       assert.equal(results.filter((result) => result.ok).length, 1);
@@ -176,7 +167,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(after.attacks.length, 1);
     });
 
-    it("concurrent joins let exactly one player in", async () => {
+    test("concurrent joins let exactly one player in", async () => {
       const creator = player();
       const code = ok(await store.create(creator)).state.gameCode;
       const joiners = Array.from({ length: 5 }, player);
@@ -190,7 +181,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       }
     });
 
-    it("matchmaking pairs two searching players into one game", async () => {
+    test("matchmaking pairs two searching players into one game", async () => {
       const first = player();
       const second = player();
       const waiting = ok(await store.startMatchmaking(first));
@@ -205,14 +196,14 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.equal(game.status, "PLACEMENT");
     });
 
-    it("cancelling matchmaking leaves the queue", async () => {
+    test("cancelling matchmaking leaves the queue", async () => {
       const searcher = player();
       ok(await store.startMatchmaking(searcher));
       assert.deepEqual(await store.cancelMatchmaking(searcher.id), { state: "NOT_PLAYING" });
       assert.equal(ok(await store.startMatchmaking(player())).state, "SEARCHING");
     });
 
-    it("simultaneous matchmaking requests pair every player exactly once", async () => {
+    test("simultaneous matchmaking requests pair every player exactly once", async () => {
       const players = Array.from({ length: 40 }, player);
       const results = await Promise.all(players.map((searcher) => store.startMatchmaking(searcher)));
       assert.ok(results.every((result) => result.ok));
@@ -227,21 +218,24 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       assert.ok([...games.values()].every((members) => members.length === 2));
     });
 
-    it("updates wake listeners for the changed game", async () => {
+    test("updates wake listeners for the changed game", async () => {
       const first = player();
       const second = player();
       const created = ok(await store.create(first)).state;
-      // Notifications are asynchronous, so the one for the create itself may still arrive after this point.
-      let listener: (version: number) => void = () => {};
+      // Notifications are asynchronous, so the one for the create itself may still arrive after this point;
+      // like the router, re-read the game on each wake and wait for the one that shows the join.
+      let listener = () => {};
       let timer: NodeJS.Timeout | undefined;
-      const woke = new Promise<number>((resolve, reject) => {
+      const woke = new Promise<void>((resolve, reject) => {
         timer = setTimeout(() => reject(new Error("no update within 2s")), 2_000);
-        listener = (version) => { if (version >= 2) resolve(version); };
+        listener = () => {
+          void store.getState(created.gameCode).then((state) => { if (state.ok && state.value.version >= 2) resolve(); });
+        };
         backend.updates.on(created.gameId, listener);
       });
       try {
         ok(await store.command(created.gameCode, second, join(second)));
-        assert.equal(await woke, 2);
+        await woke;
       } finally {
         clearTimeout(timer);
         backend.updates.off(created.gameId, listener);
@@ -249,7 +243,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       }
     });
 
-    it("a match made on another node wakes the waiting player", async () => {
+    test("a match made on another node wakes the waiting player", async () => {
       const otherNode = await harness.open();
       const waiting = player();
       let listener = () => {};
@@ -273,7 +267,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       }
     });
 
-    it("presence reports recently seen players as connected", async () => {
+    test("presence reports recently seen players as connected", async () => {
       const { first, state } = await activeGame(store);
       await store.touchPresence(state.gameId, first.id);
       const presence = await store.presence(state.gameId, state);
@@ -292,7 +286,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       return { code, first, second };
     }
 
-    it("an overdue turn times out exactly once", async () => {
+    test("an overdue turn times out exactly once", async () => {
       const timed = await harness.open({ timeoutEnabled: true });
       try {
         const { code, first, second } = await overdueGame(timed.store);
@@ -308,7 +302,7 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       }
     });
 
-    it("a move after the turn deadline times the turn out instead", async () => {
+    test("a move after the turn deadline times the turn out instead", async () => {
       const timed = await harness.open({ timeoutEnabled: true });
       try {
         const { code, first, second } = await overdueGame(timed.store);
@@ -323,12 +317,9 @@ export function defineStoreContract(name: string, harness: StoreHarness): void {
       }
     });
 
-    it("expireOneTurn does nothing when no deadline has passed", async () => {
+    test("expireOneTurn does nothing when no deadline has passed", async () => {
       await activeGame(store);
       assert.equal(await store.expireOneTurn(), false);
     });
   });
-
-  const unknown = [...pending].filter((title) => !defined.has(title));
-  if (unknown.length > 0) throw new Error(`Unknown pending tests for ${name}: ${unknown.join(", ")}`);
 }

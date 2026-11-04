@@ -5,12 +5,12 @@ export type CommandResult = { state: GameState; outcome: CommandOutcome };
 
 /** Durable storage for games, matchmaking and presence. */
 export interface GameStore {
-  /** The store's authoritative clock, used for turn deadlines. */
+  /** The time used for command timestamps and turn deadlines: the database clock for Postgres, the handling node's clock for etcd. */
   currentTime(): Promise<string>;
   create(actor: Player): Promise<Result<CommandResult>>;
   /**
    * Applies a command to the game with the given code atomically. `buildCommand` receives the current
-   * state and the store's authoritative timestamp.
+   * state and the time from `currentTime`.
    */
   command(
     gameCode: string,
@@ -29,8 +29,8 @@ export interface GameStore {
 
 /** Wakes waiting long-polls on any node when a game or a player's state changes. */
 export interface UpdateBus {
-  on(gameId: string, listener: (version: number) => void): void;
-  off(gameId: string, listener: (version: number) => void): void;
+  on(gameId: string, listener: () => void): void;
+  off(gameId: string, listener: () => void): void;
   onPlayer(playerId: string, listener: () => void): void;
   offPlayer(playerId: string, listener: () => void): void;
 }

@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Pool, PoolClient } from "pg";
 import type { UpdateBus } from "../game-store.js";
 
-type UpdatePayload = { gameId: string; version: number };
+type UpdatePayload = { gameId: string };
 type PlayerUpdatePayload = { playerId: string };
 type ArchiveUpdatePayload = { gameId: string };
 
@@ -29,8 +29,8 @@ export class GameUpdateBus implements UpdateBus {
       try {
         if (message.channel === "game_updates") {
           const payload = JSON.parse(message.payload) as UpdatePayload;
-          if (typeof payload.gameId === "string" && Number.isInteger(payload.version)) {
-            this.events.emit(`game:${payload.gameId}`, payload.version);
+          if (typeof payload.gameId === "string") {
+            this.events.emit(`game:${payload.gameId}`);
           }
         } else if (message.channel === "player_state_updates") {
           const payload = JSON.parse(message.payload) as PlayerUpdatePayload;
@@ -72,11 +72,11 @@ export class GameUpdateBus implements UpdateBus {
     }, 1_000);
   }
 
-  on(gameId: string, listener: (version: number) => void): void {
+  on(gameId: string, listener: () => void): void {
     this.events.on(`game:${gameId}`, listener);
   }
 
-  off(gameId: string, listener: (version: number) => void): void {
+  off(gameId: string, listener: () => void): void {
     this.events.off(`game:${gameId}`, listener);
   }
 

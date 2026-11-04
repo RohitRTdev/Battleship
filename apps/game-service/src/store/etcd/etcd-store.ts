@@ -245,15 +245,9 @@ export class EtcdStore implements GameStore {
           this.kv.put(keys.activeGame(opponent.id)).value(encode(active)),
           this.kv.put(keys.activeGame(actor.id)).value(encode(active)),
           this.kv.delete().key(keys.queueEntry(opponent.id))
-        )
-        .else(this.kv.get(keys.activeGame(opponent.id)));
+        );
       const matched = await this.commitConfirmed(match, keys.game(state.gameId), encode(state));
       if (matched.succeeded) return { ok: true, value: { state: "PLAYING", gameCode: state.gameCode, gameStatus: state.status } };
-      if (firstKv(matched.responses[0]?.response_range)) {
-        // A queued player who is already in a game would block the queue head forever; drop the stale entry.
-        await this.kv.if(keys.queueEntry(opponent.id), "Mod", "==", head.mod_revision)
-          .then(this.kv.delete().key(keys.queueEntry(opponent.id))).commit();
-      }
     }
     throw new Error("etcd store: too many conflicting matchmaking attempts");
   }

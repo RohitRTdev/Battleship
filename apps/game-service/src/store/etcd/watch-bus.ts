@@ -1,8 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { IKeyValue, Namespace, Watcher } from "etcd3";
-import type { GameState } from "../../game/index.js";
 import type { UpdateBus } from "../game-store.js";
-import { decode, keys } from "./keys.js";
+import { keys } from "./keys.js";
 
 /** The part of a raw etcd key after `prefix` (raw keys still carry the client's namespace). */
 function after(prefix: string, kv: IKeyValue): string {
@@ -24,9 +23,7 @@ export class EtcdUpdateBus implements UpdateBus {
 
   async start(): Promise<void> {
     const games = await this.watch(keys.gamePrefix);
-    games.on("put", (kv) => {
-      this.events.emit(`game:${after(keys.gamePrefix, kv).split("/")[0]}`, decode<GameState>(kv.value).version);
-    });
+    games.on("put", (kv) => this.events.emit(`game:${after(keys.gamePrefix, kv).split("/")[0]}`));
     // A player's state changes when their active game or queue entry is written or removed.
     for (const prefix of [keys.playerPrefix, keys.queuePrefix]) {
       const players = await this.watch(prefix);
@@ -47,18 +44,14 @@ export class EtcdUpdateBus implements UpdateBus {
   }
 
   private wakeAll(): void {
-    for (const event of this.events.eventNames()) {
-      // The version is unknown here; listeners re-read the game anyway.
-      if (typeof event === "string" && event.startsWith("game:")) this.events.emit(event, Number.MAX_SAFE_INTEGER);
-      else this.events.emit(event);
-    }
+    for (const event of this.events.eventNames()) this.events.emit(event);
   }
 
-  on(gameId: string, listener: (version: number) => void): void {
+  on(gameId: string, listener: () => void): void {
     this.events.on(`game:${gameId}`, listener);
   }
 
-  off(gameId: string, listener: (version: number) => void): void {
+  off(gameId: string, listener: () => void): void {
     this.events.off(`game:${gameId}`, listener);
   }
 

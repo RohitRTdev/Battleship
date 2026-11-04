@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { Etcd3 } from "etcd3";
 import { createEtcdBackend } from "../src/store/etcd/backend.js";
-import { encode, keys, NAMESPACE } from "../src/store/etcd/keys.js";
+import { keys, NAMESPACE } from "../src/store/etcd/keys.js";
 import type { StoreBackend } from "../src/store/index.js";
 import { defineStoreContract } from "./store-contract.js";
 
@@ -32,8 +32,7 @@ defineStoreContract("etcd", {
   },
   async reset() {
     await admin.namespace(NAMESPACE).delete().all();
-  },
-  pending: []
+  }
 });
 
 describe("etcd store", () => {
@@ -124,22 +123,6 @@ describe("etcd store", () => {
     }
   });
 
-  test("matchmaking skips a stale queue entry for a player already in a game", async () => {
-    const backend = backendFor(endpoints);
-    await backend.start();
-    try {
-      await admin.namespace(NAMESPACE).delete().all();
-      const stale = { id: "stale-player", username: "stale" };
-      ok(await backend.store.create(stale));
-      // Force the impossible state: the player is in a game and also queued.
-      await admin.namespace(NAMESPACE).put(keys.queueEntry(stale.id)).value(encode({ username: stale.username, enqueuedAt: new Date().toISOString() }));
-      const result = ok(await backend.store.startMatchmaking({ id: "fresh-player", username: "fresh" }));
-      assert.equal(result.state, "SEARCHING");
-      assert.equal(await admin.namespace(NAMESPACE).get(keys.queueEntry(stale.id)).string(), null);
-    } finally {
-      await backend.close();
-    }
-  });
 });
 
 describe("etcd backend", () => {
