@@ -4,16 +4,25 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import type { Coordinate, ShipPlacement } from "@battleship/game-contract";
 import { Etcd3 } from "etcd3";
-import type { GameState, Player } from "../../src/game/index.js";
+import type { GameState, Player, Result } from "../../src/game/index.js";
 import type { GameStore } from "../../src/store/index.js";
 import { createEtcdBackend } from "../../src/store/etcd/backend.js";
+import { CONTROL_NAMESPACE, controlKeys, decode } from "../../src/store/etcd/keys.js";
+import type { Route } from "../../src/store/etcd/etcd-store.js";
 
-const spec = process.env.TEST_ETCD_CLUSTER;
-if (!spec) throw new Error("TEST_ETCD_CLUSTER is required; run with `npm run test:failover`");
-const members = spec.split(",").map((entry) => {
-  const [name, host] = entry.split("=");
-  return { name, host };
+// id:name=host,name=host|id:...; the first cluster is the control plane, any others are data clusters.
+const spec = process.env.TEST_ETCD_CLUSTERS;
+if (!spec) throw new Error("TEST_ETCD_CLUSTERS is required; run with `npm run test:failover`");
+type Member = { name: string; host: string };
+type Cluster = { id: string; members: Member[] };
+const clusters: Cluster[] = spec.split("|").map((entry) => {
+  // Split at the first ":" only: hosts contain colons too.
+  const id = entry.slice(0, entry.indexOf(":"));
+  const list = entry.slice(entry.indexOf(":") + 1);
+  return { id, members: list.split(",").map((member) => { const [name, host] = member.split("="); return { name, host }; }) };
 });
+const sharded = clusters.length > 1;
+const hostsOf = (cluster: Cluster) => cluster.members.map((member) => member.host).join(",");
 
 const run = promisify(execFile);
 const docker = (args: string[]) => run("docker", args);
@@ -36,9 +45,9 @@ function ok<T>(result: { ok: true; value: T } | { ok: false; error: { code: stri
   return result.value;
 }
 
-/** Name of the member that is currently the Raft leader, or null during an election. */
-async function currentLeader(): Promise<string | null> {
-  for (const member of members) {
+/** Name of the member that is currently the cluster's Raft leader, or null during an election. */
+async function currentLeader(cluster: Cluster): Promise<string | null> {
+  for (const member of cluster.members) {
     const client = new Etcd3({ hosts: member.host, dialTimeout: 500, defaultCallOptions: () => ({ deadline: Date.now() + 500 }) });
     try {
       const status = await client.maintenance.status();
@@ -52,9 +61,9 @@ async function currentLeader(): Promise<string | null> {
   return null;
 }
 
-async function waitForLeader(): Promise<string> {
+async function waitForLeader(cluster: Cluster): Promise<string> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const leader = await currentLeader();
+    const leader = await currentLeader(cluster);
     if (leader) return leader;
     await sleep(200);
   }
@@ -73,34 +82,63 @@ async function untilAvailable<T>(read: () => Promise<T>): Promise<T> {
   }
 }
 
-type Attempt = { attackerId: string; coordinate: Coordinate; outcome: string; sentAt: number; doneAt: number };
-type Kill = { startedAt: number; doneAt: number };
+type Attempt = { attackerId: string; coordinate: Coordinate; outcome: string; sentAt: number; doneAt: number; clusterId: string };
+type Kill = { clusterId: string; startedAt: number; doneAt: number };
 
 const PAIRS = 20;
-const KILLS = 10;
+const KILLS = sharded ? 12 : 10;
 const MIN_IN_FLIGHT = 5;
 
-/** Kills the leader KILLS times, restarting each victim once a new leader is elected. */
+/** Kills a leader KILLS times, taking the clusters in turn, and restarts each victim once a new leader is elected. */
 async function killLeaders(kills: Kill[]): Promise<void> {
   while (kills.length < KILLS) {
-    const leader = await waitForLeader();
+    const cluster = clusters[kills.length % clusters.length];
+    const leader = await waitForLeader(cluster);
     const startedAt = Date.now();
     await docker(["kill", leader]);
-    kills.push({ startedAt, doneAt: Date.now() });
+    kills.push({ clusterId: cluster.id, startedAt, doneAt: Date.now() });
     await sleep(1_500);
-    await waitForLeader();
+    await waitForLeader(cluster);
     await docker(["start", leader]);
     await sleep(500);
   }
 }
 
+/**
+ * Game setup runs during outages too, so a step can report "unavailable" although it landed, and its retry is then
+ * rejected as already done. Setup is not what this test checks, so such a step is taken as done.
+ */
+async function settle<T>(step: () => Promise<Result<T>>, alreadyDone: string): Promise<Result<T>> {
+  const result = await untilAvailable(step);
+  if (!result.ok && result.error.code !== alreadyDone) assert.fail(`setup step failed with ${result.error.code}`);
+  return result;
+}
+
+/** The data cluster a game lives on, from its route on the control plane. */
+async function clusterOf(code: string): Promise<string> {
+  if (!sharded) return clusters[0].id;
+  const control = new Etcd3({ hosts: clusters[0].members.map((member) => member.host) });
+  try {
+    const route = await untilAvailable(() => control.namespace(CONTROL_NAMESPACE).get(controlKeys.route(code)).string());
+    return decode<Route>(route!).clusterId;
+  } finally {
+    control.close();
+  }
+}
+
 /** Plays one game between `first` and `second`, firing until it ends; returns the attempts and the final state. */
 async function playGame(store: GameStore, first: Player, second: Player, isUnavailable: (error: unknown) => boolean) {
-  const code = ok(await untilAvailable(() => store.create(first))).state.gameCode;
-  ok(await untilAvailable(() => store.command(code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt }))));
+  const created = await settle(() => store.create(first), "PLAYER_ALREADY_PLAYING");
+  const code = created.ok ? created.value.state.gameCode : await untilAvailable(async () => {
+    const current = await store.getPlayerState(first.id);
+    assert.equal(current.state, "PLAYING");
+    return current.state === "PLAYING" ? current.gameCode : "";
+  });
+  await settle(() => store.command(code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })), "PLAYER_ALREADY_IN_GAME");
   for (const player of [first, second]) {
-    ok(await untilAvailable(() => store.command(code, player, (occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: FLEET, occurredAt }))));
+    await settle(() => store.command(code, player, (occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: FLEET, occurredAt })), "FLEET_ALREADY_SUBMITTED");
   }
+  const clusterId = await clusterOf(code);
   const attempts: Attempt[] = [];
   while (true) {
     await sleep(50);
@@ -117,7 +155,7 @@ async function playGame(store: GameStore, first: Player, second: Player, isUnava
     } catch (error) {
       outcome = isUnavailable(error) ? "unavailable" : `threw ${String(error)}`;
     }
-    attempts.push({ attackerId: mover.id, coordinate, outcome, sentAt, doneAt: Date.now() });
+    attempts.push({ attackerId: mover.id, coordinate, outcome, sentAt, doneAt: Date.now(), clusterId });
   }
 }
 
@@ -146,8 +184,9 @@ function checkGame(label: string, first: Player, second: Player, attempts: Attem
   return committedDespiteError;
 }
 
-test("games survive the etcd leader being killed mid-game", { timeout: 600_000 }, async () => {
-  process.env.ETCD_ENDPOINTS = members.map((member) => member.host).join(",");
+test(`games survive etcd leaders being killed mid-game (${sharded ? "control plane and two data clusters" : "one cluster"})`, { timeout: 600_000 }, async () => {
+  process.env.ETCD_ENDPOINTS = hostsOf(clusters[0]);
+  if (sharded) process.env.ETCD_DATA_CLUSTERS = clusters.slice(1).map((cluster) => `${cluster.id}=${hostsOf(cluster)}`).join(";");
   const backend = createEtcdBackend({ timeoutEnabled: false });
   await backend.start();
   const isUnavailable = (error: unknown) => backend.isUnavailableError(error);
@@ -175,10 +214,13 @@ test("games survive the etcd leader being killed mid-game", { timeout: 600_000 }
     await backend.close();
   }
 
-  // A move was in flight when the leader died if it was sent before the kill finished and answered after it began.
-  const inFlight = attempts.filter((attempt) => kills.some((kill) => attempt.sentAt < kill.doneAt && attempt.doneAt > kill.startedAt));
+  // A move was in flight when its game's data cluster lost its leader if it was sent before the kill finished and
+  // answered after it began. (Moves never touch the control plane, so control-plane kills cannot catch one.)
+  const inFlight = attempts.filter((attempt) => kills.some((kill) =>
+    kill.clusterId === attempt.clusterId && attempt.sentAt < kill.doneAt && attempt.doneAt > kill.startedAt));
   const unavailable = attempts.filter((attempt) => attempt.outcome === "unavailable").length;
-  console.log(`games: ${games}; moves: ${attempts.length}; leader kills: ${kills.length}; ` +
+  const killsPerCluster = clusters.map((cluster) => `${cluster.id} ${kills.filter((kill) => kill.clusterId === cluster.id).length}`).join(", ");
+  console.log(`games: ${games}; moves: ${attempts.length}; leader kills: ${kills.length} (${killsPerCluster}); ` +
     `moves in flight when a leader died: ${inFlight.length} (${inFlight.filter((attempt) => attempt.outcome === "ok").length} ok, ` +
     `${inFlight.filter((attempt) => attempt.outcome === "unavailable").length} unavailable); ` +
     `requests answered unavailable: ${unavailable}; moves committed although reported unavailable: ${committedDespiteError}`);

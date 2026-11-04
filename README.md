@@ -85,7 +85,7 @@ Runs the game-service store tests against throwaway PostgreSQL and etcd containe
 npm run test:failover --workspace=@battleship/game-service
 ```
 
-Plays games on a throwaway three-node etcd cluster while repeatedly killing its leader, and checks that no move is lost, applied twice, or reported wrongly. It takes about a minute.
+Plays games on a throwaway three-node etcd cluster while repeatedly killing its leader, and checks that no move is lost, applied twice, or reported wrongly. It takes about a minute. `npm run test:failover:sharded --workspace=@battleship/game-service` does the same with a control-plane cluster and two data clusters, killing the leaders of all three in turn.
 
 ## Test bots
 
