@@ -85,6 +85,35 @@ async function readParticipantGame(
   return { ok: true, value: { state: state.value } };
 }
 
+type WakeReason = "update" | "timeout" | "closed";
+
+/**
+ * Subscribes a long-poll to changes (`subscribe`) and to the client disconnecting. Subscribe before re-reading the
+ * state, so a change made in between still wakes the poll; `wait` then waits up to 3 s, and `stop` unsubscribes.
+ */
+function watchForChange(response: Response, subscribe: (listener: () => void) => void, unsubscribe: (listener: () => void) => void) {
+  let reason: WakeReason | null = null;
+  let wake: ((value: WakeReason) => void) | null = null;
+  const settle = (value: WakeReason) => { reason ??= value; wake?.(value); };
+  const onUpdate = () => settle("update");
+  const onClose = () => settle("closed");
+  subscribe(onUpdate);
+  response.on("close", onClose);
+  return {
+    wait(): Promise<WakeReason> {
+      if (reason) return Promise.resolve(reason);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve("timeout"), 3_000);
+        wake = (value) => { clearTimeout(timer); resolve(value); };
+      });
+    },
+    stop(): void {
+      unsubscribe(onUpdate);
+      response.off("close", onClose);
+    }
+  };
+}
+
 export function createGameRouter(repository: GameStore, updates: UpdateBus, archive: MatchArchive): Router {
   const router = Router();
 
@@ -119,30 +148,16 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
     const initial = await repository.getPlayerState(playerId);
     if (initial.state !== "SEARCHING") return matchmakingUpdate(response, initial);
 
-    let closed = false;
-    let notified = false;
-    let wake: ((reason: "update" | "timeout" | "closed") => void) | null = null;
-    const onUpdate = () => { notified = true; wake?.("update"); };
-    const onClose = () => { closed = true; wake?.("closed"); };
-    updates.onPlayer(playerId, onUpdate);
-    response.on("close", onClose);
-
-    const secondRead = await repository.getPlayerState(playerId);
-    if (secondRead.state !== "SEARCHING") {
-      updates.offPlayer(playerId, onUpdate);
-      response.off("close", onClose);
-      return matchmakingUpdate(response, secondRead);
+    const watch = watchForChange(response, (listener) => updates.onPlayer(playerId, listener),
+      (listener) => updates.offPlayer(playerId, listener));
+    let reason: WakeReason;
+    try {
+      const secondRead = await repository.getPlayerState(playerId);
+      if (secondRead.state !== "SEARCHING") return matchmakingUpdate(response, secondRead);
+      reason = await watch.wait();
+    } finally {
+      watch.stop();
     }
-
-    let reason: "update" | "timeout" | "closed" = "update";
-    if (!closed && !notified) {
-      reason = await new Promise((resolve) => {
-        const timer = setTimeout(() => resolve("timeout"), 3_000);
-        wake = (value) => { clearTimeout(timer); resolve(value); };
-      });
-    }
-    updates.offPlayer(playerId, onUpdate);
-    response.off("close", onClose);
     if (reason === "closed" || response.writableEnded) return;
     matchmakingUpdate(response, await repository.getPlayerState(playerId));
   });
@@ -256,30 +271,16 @@ export function createGameRouter(repository: GameStore, updates: UpdateBus, arch
       return response.json({ type: "GAME_UPDATED", game: view.value });
     }
 
-    let closed = false;
-    let notified = false;
-    let wake: ((reason: "update" | "timeout" | "closed") => void) | null = null;
-    const onUpdate = () => { notified = true; wake?.("update"); };
-    const onClose = () => { closed = true; wake?.("closed"); };
-    updates.on(initial.value.state.gameId, onUpdate);
-    response.on("close", onClose);
-    const secondRead = await readParticipantGame(repository, code, request.user!.id);
-    if (!secondRead.ok) {
-      updates.off(initial.value.state.gameId, onUpdate);
-      response.off("close", onClose);
-      return sendError(response, secondRead.error);
+    const gameId = initial.value.state.gameId;
+    const watch = watchForChange(response, (listener) => updates.on(gameId, listener), (listener) => updates.off(gameId, listener));
+    let reason: WakeReason;
+    try {
+      const secondRead = await readParticipantGame(repository, code, request.user!.id);
+      if (!secondRead.ok) return sendError(response, secondRead.error);
+      reason = secondRead.value.state.version > afterVersion ? "update" : await watch.wait();
+    } finally {
+      watch.stop();
     }
-    let reason: "update" | "timeout" | "closed" = "update";
-    if (secondRead.value.state.version <= afterVersion && !closed && !notified) {
-      reason = await new Promise((resolve) => {
-        wake = resolve;
-        const timer = setTimeout(() => resolve("timeout"), 3_000);
-        const originalWake = wake;
-        wake = (value) => { clearTimeout(timer); originalWake(value); };
-      });
-    }
-    updates.off(initial.value.state.gameId, onUpdate);
-    response.off("close", onClose);
     if (reason === "closed" || response.writableEnded) return;
 
     const latest = await readParticipantGame(repository, code, request.user!.id);
