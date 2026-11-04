@@ -5,7 +5,9 @@ import { promisify } from "node:util";
 import { Etcd3 } from "etcd3";
 import { createEtcdBackend } from "../src/store/etcd/backend.js";
 import { createGame, type GameCommand, type Player } from "../src/game/index.js";
-import { CONTROL_NAMESPACE, controlKeys, dataKeys, dataNamespace, encode, NAMESPACE } from "../src/store/etcd/keys.js";
+import { CONTROL_NAMESPACE, controlKeys, dataKeys, dataNamespace, decode, encode, NAMESPACE } from "../src/store/etcd/keys.js";
+import type { Route } from "../src/store/etcd/etcd-store.js";
+import { readRegistry } from "../src/store/etcd/clusters.js";
 import type { StoreBackend } from "../src/store/index.js";
 import { defineStoreContract } from "./store-contract.js";
 
@@ -124,6 +126,81 @@ describe("etcd data clusters", () => {
       assert.equal(state.status, "ACTIVE");
     } finally {
       if (paused) await docker("unpause", container);
+      await node.close();
+    }
+  });
+
+  test("clusters can be drained, removed and registered while nodes run", { timeout: 120_000 }, async () => {
+    const run = promisify(execFile);
+    const cli = (...args: string[]) => run("npx", ["tsx", "src/cli/clusters.ts", ...args], { env: { ...process.env, ETCD_ENDPOINTS: control } });
+    const controlKv = admins[0].namespace(CONTROL_NAMESPACE);
+    const clusterOf = async (code: string) => decode<Route>((await controlKv.get(controlKeys.route(code)).string())!).clusterId;
+    const until = async (check: () => Promise<boolean>) => {
+      for (let attempt = 0; attempt < 50 && !(await check()); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+    };
+    const node = shardedBackend();
+    let player = 0;
+    const someone = (): Player => { player += 1; return { id: `registry-${player}`, username: `registry${player}` }; };
+    try {
+      await Promise.all(admins.map((admin) => admin.namespace(NAMESPACE).delete().all()));
+      await node.start();
+      assert.deepEqual([...(await readRegistry(controlKv)).entries()].map(([id, record]) => `${id}:${record.state}`).sort(), ["a:ACTIVE", "b:ACTIVE"]);
+
+      // A game in progress on b.
+      let onB: { code: string; first: Player } | null = null;
+      while (!onB) {
+        const first = someone();
+        const code = ok(await node.store.create(first)).state.gameCode;
+        if (await clusterOf(code) === "b") onB = { code, first };
+      }
+      const second = someone();
+      ok(await node.store.command(onB.code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+
+      await cli("drain", "b");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      for (let index = 0; index < 10; index += 1) {
+        assert.equal(await clusterOf(ok(await node.store.create(someone())).state.gameCode), "a", "a draining cluster must get no new games");
+      }
+      // The draining cluster still serves its game.
+      ok(await node.store.command(onB.code, second, (occurredAt) => ({ type: "CANCEL_GAME", actor: second, occurredAt })));
+
+      // Cancelled games have no archive job, so b is now empty and can go.
+      const removed = await cli("remove", "b");
+      assert.match(removed.stdout, /b: DRAINING -> REMOVED/);
+      await until(async () => !(await node.store.getState(onB!.code)).ok);
+      const gone = await node.store.getState(onB.code);
+      assert.equal(gone.ok ? "found" : gone.error.code, "GAME_NOT_FOUND");
+      assert.deepEqual(await node.store.getPlayerState(onB.first.id), { state: "NOT_PLAYING" });
+
+      // A newly registered cluster takes new games once the old one drains.
+      const bHosts = dataClusters!.split(";").find((entry) => entry.startsWith("b="))!.slice(2);
+      await cli("register", "c", bHosts);
+      await cli("drain", "a");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const onC = ok(await node.store.create(someone())).state;
+      assert.equal(await clusterOf(onC.gameCode), "c");
+      assert.ok(await clusters[1].admin.namespace(dataNamespace("c")).get(dataKeys.game(onC.gameId)).string(), "game written under c's namespace");
+      assert.equal(ok(await node.store.getState(onC.gameCode)).gameId, onC.gameId);
+    } finally {
+      await node.close();
+    }
+  });
+
+  test("a cluster is not removed while it has unfinished games", { timeout: 60_000 }, async () => {
+    const run = promisify(execFile);
+    const cli = (...args: string[]) => run("npx", ["tsx", "src/cli/clusters.ts", ...args], { env: { ...process.env, ETCD_ENDPOINTS: control } });
+    const node = shardedBackend();
+    try {
+      await Promise.all(admins.map((admin) => admin.namespace(NAMESPACE).delete().all()));
+      await node.start();
+      await cli("drain", "a");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      ok(await node.store.create({ id: "unfinished", username: "unfinished" }));
+      await cli("activate", "a");
+      await cli("drain", "b");
+      const refused = await cli("remove", "b").then(() => null, (error: { stderr: string }) => error.stderr);
+      assert.match(refused ?? "", /still has 1 unfinished games/);
+    } finally {
       await node.close();
     }
   });

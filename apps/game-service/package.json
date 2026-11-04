@@ -9,7 +9,8 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "test": "tsc -p test/tsconfig.json && sh scripts/test.sh",
     "test:failover": "tsc -p test/tsconfig.json && sh scripts/test-failover.sh",
-    "test:failover:sharded": "tsc -p test/tsconfig.json && FAILOVER_LAYOUT=sharded sh scripts/test-failover.sh"
+    "test:failover:sharded": "tsc -p test/tsconfig.json && FAILOVER_LAYOUT=sharded sh scripts/test-failover.sh",
+    "clusters": "tsx src/cli/clusters.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",

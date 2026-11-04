@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { IKeyValue, Namespace, Watcher } from "etcd3";
 import type { UpdateBus } from "../game-store.js";
-import type { DataCluster } from "./etcd-store.js";
+import type { ClusterSet, DataCluster } from "./clusters.js";
 import { controlKeys, dataKeys } from "./keys.js";
 
 /** The part of a raw etcd key after `prefix` (raw keys still carry the client's namespace). */
@@ -17,10 +17,11 @@ function after(prefix: string, kv: IKeyValue): string {
 export class EtcdUpdateBus implements UpdateBus {
   private readonly events = new EventEmitter();
   private watchers: Watcher[] = [];
+  private readonly clusterWatchers = new Map<string, Watcher[]>();
 
   constructor(
     private readonly control: Namespace,
-    private readonly clusters: DataCluster[]
+    private readonly clusters: ClusterSet
   ) {
     this.events.setMaxListeners(0);
   }
@@ -32,13 +33,23 @@ export class EtcdUpdateBus implements UpdateBus {
       const wake = (kv: IKeyValue) => this.events.emit(`player:${after(prefix, kv).split("/")[0]}`);
       players.on("put", wake).on("delete", wake);
     }
-    // Games and their archive jobs live on the data clusters.
-    for (const cluster of this.clusters) {
-      const games = await this.watch(cluster.kv, dataKeys.gamePrefix);
-      games.on("put", (kv) => this.events.emit(`game:${after(dataKeys.gamePrefix, kv).split("/")[0]}`));
-      const jobs = await this.watch(cluster.kv, dataKeys.archivePrefix);
-      jobs.on("put", (kv) => this.events.emit("archive", after(dataKeys.archivePrefix, kv)));
-    }
+    // Games and their archive jobs live on the data clusters, including any registered later.
+    for (const cluster of this.clusters.list()) await this.watchCluster(cluster);
+    this.clusters.onAdded((cluster) => void this.watchCluster(cluster).catch((error) => console.error(`etcd watch on cluster ${cluster.id} failed`, error)));
+    this.clusters.onRemoved((cluster) => {
+      for (const watcher of this.clusterWatchers.get(cluster.id) ?? []) void watcher.cancel().catch(() => undefined);
+      this.clusterWatchers.delete(cluster.id);
+    });
+  }
+
+  private async watchCluster(cluster: DataCluster): Promise<void> {
+    const games = await this.watch(cluster.kv, dataKeys.gamePrefix);
+    games.on("put", (kv) => this.events.emit(`game:${after(dataKeys.gamePrefix, kv).split("/")[0]}`));
+    const jobs = await this.watch(cluster.kv, dataKeys.archivePrefix);
+    jobs.on("put", (kv) => this.events.emit("archive", after(dataKeys.archivePrefix, kv)));
+    this.clusterWatchers.set(cluster.id, [games, jobs]);
+    // A new cluster may already hold archive jobs; let the worker look.
+    this.events.emit("archive");
   }
 
   private async watch(kv: Namespace, prefix: string): Promise<Watcher> {
@@ -79,7 +90,8 @@ export class EtcdUpdateBus implements UpdateBus {
   }
 
   async close(): Promise<void> {
-    await Promise.all(this.watchers.map((watcher) => watcher.cancel()));
+    await Promise.all(this.watchers.map((watcher) => watcher.cancel().catch(() => undefined)));
     this.watchers = [];
+    this.clusterWatchers.clear();
   }
 }

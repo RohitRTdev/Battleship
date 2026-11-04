@@ -17,6 +17,9 @@ export const controlKeys = {
   route: (gameCode: string) => `routes/${gameCode}`,
   /** The data cluster of a game, by id (presence is looked up by game id). */
   gameCluster: (gameId: string) => `game-clusters/${gameId}`,
+  /** A data cluster's registration: its endpoints and whether it takes new games (see clusters.ts). */
+  cluster: (clusterId: string) => `clusters/${clusterId}`,
+  clusterPrefix: "clusters/",
   health: "health"
 } as const;
 

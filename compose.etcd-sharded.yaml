@@ -1,5 +1,6 @@
 # Config 2, sharded: compose.etcd.yaml's three etcd nodes become the control plane, and this adds two more
-# three-node etcd clusters (a and b) that hold the games. Use with both other files, e.g. `./setup.sh up etcd-sharded`:
+# three-node etcd clusters (a and b) that hold the games. a and b seed the cluster registry on first start; after that,
+# manage clusters with `npm run clusters` (see README). Use with both other files, e.g. `./setup.sh up etcd-sharded`:
 #   COMPOSE_FILE=compose.yaml:compose.etcd.yaml:compose.etcd-sharded.yaml docker compose up --build --detach --wait
 
 x-data-node: &data-node
@@ -35,6 +36,18 @@ x-sharded-backend: &sharded-backend
       condition: service_healthy
 
 services:
+  # The control plane keeps its own data here, so this layout's cluster registry (a, b) never mixes with the
+  # single-cluster layout's (main) in runtime/etcd.
+  etcd-1:
+    volumes:
+      - ./runtime/etcd-sharded/etcd-1:/var/lib/etcd
+  etcd-2:
+    volumes:
+      - ./runtime/etcd-sharded/etcd-2:/var/lib/etcd
+  etcd-3:
+    volumes:
+      - ./runtime/etcd-sharded/etcd-3:/var/lib/etcd
+
   backend-node-1: *sharded-backend
   backend-node-2: *sharded-backend
   backend-node-3: *sharded-backend

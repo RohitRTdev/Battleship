@@ -16,11 +16,9 @@ import {
 } from "../../game/index.js";
 import type { CommandResult, GameStore } from "../game-store.js";
 import type { ArchiveJob } from "./archive-outbox.js";
+import type { ClusterSet, DataCluster } from "./clusters.js";
 import { isEtcdUnavailable } from "./errors.js";
 import { controlKeys, dataKeys, decode, encode } from "./keys.js";
-
-/** One data cluster: the id routes refer to, and the namespace its per-game keys live in. */
-export type DataCluster = { id: string; kv: Namespace };
 
 /**
  * Value of players/<id>/active on the control plane: a player's claim on one game. The game on its data cluster is
@@ -72,11 +70,9 @@ export class EtcdStore implements GameStore {
 
   constructor(
     private readonly control: Namespace,
-    private readonly clusters: DataCluster[],
+    private readonly clusters: ClusterSet,
     private readonly timeoutEnabled: boolean
-  ) {
-    if (clusters.length === 0) throw new Error("etcd store needs at least one data cluster");
-  }
+  ) {}
 
   /** etcd has no clock, so each node's own (NTP-synchronised) clock is the time source. */
   async currentTime(): Promise<string> {
@@ -296,13 +292,14 @@ export class EtcdStore implements GameStore {
     return presence;
   }
 
-  /** Expires one overdue game, trying each data cluster in turn. */
+  /** Expires one overdue game, trying each data cluster (draining ones too) in turn. */
   async expireOneTurn(): Promise<boolean> {
-    for (let offset = 0; offset < this.clusters.length; offset += 1) {
-      const cluster = this.clusters[(this.nextExpiryCluster + offset) % this.clusters.length];
+    const clusters = this.clusters.list();
+    for (let offset = 0; offset < clusters.length; offset += 1) {
+      const cluster = clusters[(this.nextExpiryCluster + offset) % clusters.length];
       if (await this.expireOneTurnIn(cluster)) return true;
     }
-    this.nextExpiryCluster = (this.nextExpiryCluster + 1) % this.clusters.length;
+    this.nextExpiryCluster = clusters.length === 0 ? 0 : (this.nextExpiryCluster + 1) % clusters.length;
     return false;
   }
 
@@ -409,18 +406,18 @@ export class EtcdStore implements GameStore {
   }
 
   /**
-   * The route for a game code, or null if there is none, or if it points at a data cluster this node is not configured
-   * with (for example one that has been removed): such a game cannot be reached, and claims on it are stale.
+   * The route for a game code, or null if there is none, or if it points at a data cluster this node does not have
+   * (for example one that has been removed): such a game cannot be reached, and claims on it are stale.
    */
   private async readRoute(gameCode: string): Promise<Route | null> {
-    const cached = this.routes.get(gameCode);
-    if (cached) return cached;
-    const stored = await this.control.get(controlKeys.route(gameCode)).string();
-    if (!stored) return null;
-    const route = decode<Route>(stored);
-    if (!this.clusters.some((cluster) => cluster.id === route.clusterId)) return null;
-    this.remember(gameCode, route);
-    return route;
+    let route = this.routes.get(gameCode);
+    if (!route) {
+      const stored = await this.control.get(controlKeys.route(gameCode)).string();
+      if (!stored) return null;
+      route = decode<Route>(stored);
+      this.remember(gameCode, route);
+    }
+    return this.clusters.get(route.clusterId) ? route : null;
   }
 
   private remember(gameCode: string, route: Route): void {
@@ -440,14 +437,16 @@ export class EtcdStore implements GameStore {
   }
 
   private cluster(clusterId: string): DataCluster {
-    const cluster = this.clusters.find((candidate) => candidate.id === clusterId);
+    const cluster = this.clusters.get(clusterId);
     if (!cluster) throw new Error(`etcd store: unknown data cluster ${clusterId}`);
     return cluster;
   }
 
-  /** The data cluster for a new game. */
+  /** The data cluster for a new game: a random ACTIVE one, so draining clusters get no new games. */
   private pickCluster(): DataCluster {
-    return this.clusters[Math.floor(Math.random() * this.clusters.length)];
+    const active = this.clusters.active();
+    if (active.length === 0) throw new Error("etcd store: no ACTIVE data cluster to place a new game on");
+    return active[Math.floor(Math.random() * active.length)];
   }
 
   private routeWrites(route: Route): IOperation[] {

@@ -58,6 +58,17 @@ By default the three backend nodes keep games in PostgreSQL (config 1). Config 2
 
 To split etcd into a control plane (players, matchmaking, game routes) and two data clusters that hold the games, use `./setup.sh up etcd-sharded` (nine etcd nodes; `compose.etcd-sharded.yaml`). Each game lives on one data cluster; backends find it through its route on the control plane.
 
+Data clusters are registered on the control plane. The first backend to start seeds the registry (from `ETCD_DATA_CLUSTERS`, or one cluster `main`); after that, manage clusters with the CLI, here run inside a backend container:
+
+```sh
+cli() { docker exec battleship-backend-node-1 npm run --silent clusters --workspace=@battleship/game-service -- "$@"; }
+cli list                                   # state, endpoints, unfinished games, pending archive jobs
+cli register c host-1:2379,host-2:2379     # new games start going to c; every backend connects to it
+cli drain b                                # no new games on b; its games carry on
+cli activate b                             # undo a drain
+cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
+```
+
 To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager.
 
 `compose.etcd.yaml` adds the etcd nodes (data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the cluster and which node is the leader:

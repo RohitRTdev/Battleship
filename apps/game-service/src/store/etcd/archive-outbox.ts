@@ -1,6 +1,6 @@
 import type { GameState } from "../../game/index.js";
 import type { ArchiveJobResult, ArchiveOutbox } from "../archive-outbox.js";
-import type { DataCluster } from "./etcd-store.js";
+import type { ClusterSet, DataCluster } from "./clusters.js";
 import { dataKeys as keys, decode, encode } from "./keys.js";
 import type { EtcdUpdateBus } from "./watch-bus.js";
 
@@ -17,12 +17,12 @@ const SCAN_LIMIT = 100;
  */
 export class EtcdArchiveOutbox implements ArchiveOutbox {
   constructor(
-    private readonly clusters: DataCluster[],
+    private readonly clusters: ClusterSet,
     private readonly updates: EtcdUpdateBus
   ) {}
 
   async processNext(archive: (snapshot: GameState) => Promise<void>): Promise<ArchiveJobResult> {
-    for (const cluster of this.clusters) {
+    for (const cluster of this.clusters.list()) {
       const result = await this.processNextIn(cluster.kv, archive);
       if (result.kind !== "empty") return result;
     }
