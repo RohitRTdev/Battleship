@@ -109,7 +109,7 @@ up_prod() {
 
   echo "Deploying AWS application resources..."
   terraform -chdir=infra/terraform/app init -input=false
-  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=$backend_image"
+  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="store_mode=$store_mode" -var="backend_image=$backend_image"
 
   public_url=$(terraform -chdir=infra/terraform/app output -raw public_url)
   user_pool_id=$(terraform -chdir=infra/terraform/app output -raw cognito_user_pool_id)
@@ -132,7 +132,7 @@ down_prod() {
     echo "No local production Terraform state was found; refusing an unscoped deletion." >&2
     exit 1
   fi
-  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=destroy"
+  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="store_mode=$store_mode" -var="backend_image=destroy"
   terraform -chdir=infra/terraform/bootstrap destroy -auto-approve -input=false $(terraform_args)
   rm -rf .deployment
   echo "Production resources and data were deleted."
@@ -153,11 +153,16 @@ usage() {
   echo "  ./setup.sh down etcd   Stop the etcd development environment"
   echo "  ./setup.sh up prod     Build and deploy to AWS"
   echo "  ./setup.sh down prod   Permanently delete the AWS deployment"
+  echo "  ./setup.sh up prod etcd     Deploy to AWS with the etcd store (config 2)"
+  echo "  ./setup.sh down prod etcd   Permanently delete the etcd AWS deployment"
   echo "  ./setup.sh reset       Delete generated development data"
 }
 
 command=${1:-help}
 environment=${2:-dev}
+# Store for the AWS deployment: postgres (config 1, RDS) or etcd (config 2, three EC2 nodes).
+store_mode=${3:-postgres}
+case "$store_mode" in postgres | etcd) ;; *) usage >&2; exit 1 ;; esac
 case "$command:$environment" in
   up:dev) up_dev ;;
   down:dev) down_dev ;;

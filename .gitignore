@@ -17,4 +17,5 @@ Thumbs.db
 .terraform/
 *.tfstate
 *.tfstate.*
+*.tfplan
 .deployment/

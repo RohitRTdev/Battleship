@@ -33,11 +33,12 @@ resource "aws_security_group" "etcd" {
   name_prefix = "${var.name}-etcd-"
   vpc_id      = aws_vpc.main.id
   ingress {
-    description     = "etcd clients (game-service)"
+    description     = "etcd clients (game-service, and etcdctl on the nodes themselves)"
     from_port       = 2379
     to_port         = 2379
     protocol        = "tcp"
     security_groups = [aws_security_group.backend.id]
+    self            = true
   }
   ingress {
     description = "etcd peers"
