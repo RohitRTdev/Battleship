@@ -406,12 +406,17 @@ export class EtcdStore implements GameStore {
       .commit();
   }
 
+  /**
+   * The route for a game code, or null if there is none, or if it points at a data cluster this node is not configured
+   * with (for example one that has been removed): such a game cannot be reached, and claims on it are stale.
+   */
   private async readRoute(gameCode: string): Promise<Route | null> {
     const cached = this.routes.get(gameCode);
     if (cached) return cached;
     const stored = await this.control.get(controlKeys.route(gameCode)).string();
     if (!stored) return null;
     const route = decode<Route>(stored);
+    if (!this.clusters.some((cluster) => cluster.id === route.clusterId)) return null;
     this.remember(gameCode, route);
     return route;
   }

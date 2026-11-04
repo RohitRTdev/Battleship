@@ -8,20 +8,44 @@ import { CONTROL_NAMESPACE, controlKeys, dataKeys, dataNamespace } from "./keys.
 
 const CALL_TIMEOUT_MS = 2_000;
 
-export function createEtcdBackend(options: StoreOptions): StoreBackend {
-  const endpoints = (process.env.ETCD_ENDPOINTS ?? "").split(",").map((endpoint) => endpoint.trim()).filter(Boolean);
-  if (endpoints.length === 0) throw new Error("ETCD_ENDPOINTS is required, e.g. etcd-1:2379,etcd-2:2379,etcd-3:2379");
+function hosts(list: string): string[] {
+  return list.split(",").map((endpoint) => endpoint.trim()).filter(Boolean);
+}
 
-  const client = new Etcd3({
+function connect(endpoints: string[]): Etcd3 {
+  return new Etcd3({
     hosts: endpoints,
     dialTimeout: CALL_TIMEOUT_MS,
     // Deadlines fail fast when etcd is unreachable, but must not apply to long-lived streams (watches, lease
     // keep-alives), which would otherwise be cut and re-established every CALL_TIMEOUT_MS.
     defaultCallOptions: (context) => (context.isStream ? {} : { deadline: Date.now() + CALL_TIMEOUT_MS })
   });
-  // One etcd cluster serves as both the control plane and the single data cluster, under separate namespaces.
+}
+
+/**
+ * ETCD_ENDPOINTS is the control-plane cluster. ETCD_DATA_CLUSTERS, if set, lists the data clusters as
+ * `id=host:port,host:port;id=host:port,...`; otherwise the control-plane cluster is also the one data cluster.
+ */
+export function createEtcdBackend(options: StoreOptions): StoreBackend {
+  const endpoints = hosts(process.env.ETCD_ENDPOINTS ?? "");
+  if (endpoints.length === 0) throw new Error("ETCD_ENDPOINTS is required, e.g. etcd-1:2379,etcd-2:2379,etcd-3:2379");
+  const client = connect(endpoints);
+  const clients = [client];
   const control = client.namespace(CONTROL_NAMESPACE);
-  const clusters: DataCluster[] = [{ id: "main", kv: client.namespace(dataNamespace("main")) }];
+
+  const dataClusters = (process.env.ETCD_DATA_CLUSTERS ?? "").split(";").map((entry) => entry.trim()).filter(Boolean);
+  const clusters: DataCluster[] = dataClusters.length === 0
+    ? [{ id: "main", kv: client.namespace(dataNamespace("main")) }]
+    : dataClusters.map((entry) => {
+        const [id, list] = entry.split("=");
+        if (!id || !/^[A-Za-z0-9_-]+$/.test(id) || hosts(list ?? "").length === 0) {
+          throw new Error(`ETCD_DATA_CLUSTERS entry "${entry}" must look like id=host:port,host:port`);
+        }
+        const dataClient = connect(hosts(list));
+        clients.push(dataClient);
+        return { id, kv: dataClient.namespace(dataNamespace(id)) };
+      });
+  if (new Set(clusters.map((cluster) => cluster.id)).size !== clusters.length) throw new Error("ETCD_DATA_CLUSTERS ids must be unique");
   const updates = new EtcdUpdateBus(control, clusters);
   let ready = false;
 
@@ -69,7 +93,7 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
     async close() {
       ready = false;
       await updates.close().catch(() => undefined);
-      client.close();
+      for (const each of clients) each.close();
     }
   };
 }
