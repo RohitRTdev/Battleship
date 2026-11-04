@@ -4,7 +4,8 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import type { Coordinate, ShipPlacement } from "@battleship/game-contract";
 import { Etcd3 } from "etcd3";
-import type { Player } from "../../src/game/index.js";
+import type { GameState, Player } from "../../src/game/index.js";
+import type { GameStore } from "../../src/store/index.js";
 import { createEtcdBackend } from "../../src/store/etcd/backend.js";
 
 const spec = process.env.TEST_ETCD_CLUSTER;
@@ -72,102 +73,116 @@ async function untilAvailable<T>(read: () => Promise<T>): Promise<T> {
   }
 }
 
-type Attempt = { attackerId: string; coordinate: Coordinate; outcome: string; detail?: string };
+type Attempt = { attackerId: string; coordinate: Coordinate; outcome: string; sentAt: number; doneAt: number };
+type Kill = { startedAt: number; doneAt: number };
+
+const PAIRS = 20;
+const KILLS = 10;
+const MIN_IN_FLIGHT = 5;
+
+/** Kills the leader KILLS times, restarting each victim once a new leader is elected. */
+async function killLeaders(kills: Kill[]): Promise<void> {
+  while (kills.length < KILLS) {
+    const leader = await waitForLeader();
+    const startedAt = Date.now();
+    await docker(["kill", leader]);
+    kills.push({ startedAt, doneAt: Date.now() });
+    await sleep(1_500);
+    await waitForLeader();
+    await docker(["start", leader]);
+    await sleep(500);
+  }
+}
+
+/** Plays one game between `first` and `second`, firing until it ends; returns the attempts and the final state. */
+async function playGame(store: GameStore, first: Player, second: Player, isUnavailable: (error: unknown) => boolean) {
+  const code = ok(await untilAvailable(() => store.create(first))).state.gameCode;
+  ok(await untilAvailable(() => store.command(code, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt }))));
+  for (const player of [first, second]) {
+    ok(await untilAvailable(() => store.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: FLEET, occurredAt }))));
+  }
+  const attempts: Attempt[] = [];
+  while (true) {
+    await sleep(50);
+    const state = ok(await untilAvailable(() => store.getState(code)));
+    if (state.status === "FINISHED") return { attempts, final: state };
+    const mover = state.currentTurn === first.id ? first : second;
+    const coordinate = (mover === first ? HITS : MISSES)
+      .find((target) => !state.attacks.some((attack) => attack.attackerId === mover.id && same(attack.coordinate, target)))!;
+    const sentAt = Date.now();
+    let outcome: string;
+    try {
+      const result = await store.command(code, mover, (_state, occurredAt) => ({ type: "FIRE", actor: mover, coordinate, occurredAt }));
+      outcome = result.ok ? "ok" : result.error.code;
+    } catch (error) {
+      outcome = isUnavailable(error) ? "unavailable" : `threw ${String(error)}`;
+    }
+    attempts.push({ attackerId: mover.id, coordinate, outcome, sentAt, doneAt: Date.now() });
+  }
+}
+
+/** Checks one finished game against what its players sent and were told. Returns moves stored despite an error. */
+function checkGame(label: string, first: Player, second: Player, attempts: Attempt[], final: GameState): number {
+  const failures = `${label}: ${JSON.stringify(attempts.filter((attempt) => attempt.outcome !== "ok"))}`;
+  assert.equal(final.winnerPlayerId, first.id, failures);
+  assert.equal(final.version, 4 + final.attacks.length, `version and move count disagree; ${failures}`);
+  final.attacks.forEach((attack, index) => {
+    assert.equal(attack.attackerId, index % 2 === 0 ? first.id : second.id, `turns out of order at ${index}; ${failures}`);
+  });
+  // Every attempt either succeeded or reported that the store was unavailable; nothing was wrongly rejected.
+  for (const attempt of attempts) assert.ok(["ok", "unavailable"].includes(attempt.outcome), `${attempt.outcome}; ${failures}`);
+  // No acknowledged move was lost.
+  for (const attempt of attempts.filter((candidate) => candidate.outcome === "ok")) {
+    assert.ok(final.attacks.some((attack) => attack.attackerId === attempt.attackerId && same(attack.coordinate, attempt.coordinate)),
+      `acknowledged move lost: ${JSON.stringify(attempt)}`);
+  }
+  // Every stored move came from an attempt; count the ones whose request reported an error.
+  let committedDespiteError = 0;
+  for (const attack of final.attacks) {
+    const matching = attempts.filter((attempt) => attempt.attackerId === attack.attackerId && same(attempt.coordinate, attack.coordinate));
+    assert.ok(matching.length > 0, `stored move nobody sent: ${JSON.stringify(attack)}`);
+    if (!matching.some((attempt) => attempt.outcome === "ok")) committedDespiteError += 1;
+  }
+  return committedDespiteError;
+}
 
 test("games survive the etcd leader being killed mid-game", { timeout: 600_000 }, async () => {
   process.env.ETCD_ENDPOINTS = members.map((member) => member.host).join(",");
   const backend = createEtcdBackend({ timeoutEnabled: false });
   await backend.start();
-  const { store } = backend;
-  const GAMES = 5;
-  const MIN_KILLS = 8;
-  let kills = 0;
+  const isUnavailable = (error: unknown) => backend.isUnavailableError(error);
+  const kills: Kill[] = [];
+  const attempts: Attempt[] = [];
+  let games = 0;
   let committedDespiteError = 0;
-  let unavailable = 0;
 
   try {
-    for (let gameIndex = 0; gameIndex < GAMES; gameIndex += 1) {
-      const first: Player = { id: `failover-${gameIndex}-first`, username: "first" };
-      const second: Player = { id: `failover-${gameIndex}-second`, username: "second" };
-      const code = ok(await store.create(first)).state.gameCode;
-      ok(await store.command(code, second, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
-      for (const player of [first, second]) {
-        ok(await store.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships: FLEET, occurredAt })));
+    // Many pairs play at once, starting new games until the killer is done, so most kills land on moves in flight.
+    const killer = killLeaders(kills);
+    let killing = true;
+    void killer.finally(() => { killing = false; });
+    await Promise.all([killer, ...Array.from({ length: PAIRS }, async (_, pair) => {
+      for (let round = 0; killing; round += 1) {
+        const first: Player = { id: `failover-${pair}-${round}-first`, username: "first" };
+        const second: Player = { id: `failover-${pair}-${round}-second`, username: "second" };
+        const game = await playGame(backend.store, first, second, isUnavailable);
+        committedDespiteError += checkGame(`pair ${pair} round ${round}`, first, second, game.attempts, game.final);
+        attempts.push(...game.attempts);
+        games += 1;
       }
-
-      const attempts: Attempt[] = [];
-      let outage: { name: string; startedAt: number; done: boolean; kill: Promise<unknown> } | null = null;
-      let nextKillMove = 3;
-      const endOutage = async (move: number) => {
-        if (!outage) return;
-        await outage.kill;
-        kills += 1;
-        await waitForLeader();
-        await docker(["start", outage.name]);
-        outage = null;
-        nextKillMove = move + 2;
-      };
-      for (let move = 1; ; move += 1) {
-        // Pace moves normally, but keep sending during an outage so requests are in flight when the leader dies.
-        if (!outage) await sleep(50);
-        const state = ok(await untilAvailable(() => store.getState(code)));
-        if (state.status === "FINISHED") break;
-        const mover = state.currentTurn === first.id ? first : second;
-        const coordinate = (mover === first ? HITS : MISSES)
-          .find((target) => !state.attacks.some((attack) => attack.attackerId === mover.id && same(attack.coordinate, target)))!;
-
-        if (!outage && move >= nextKillMove) {
-          // Kill the leader in the background and keep playing straight through the outage.
-          const name = await waitForLeader();
-          const pending = { name, startedAt: Date.now(), done: false, kill: docker(["kill", name]) };
-          pending.kill.then(() => { pending.done = true; }, () => { pending.done = true; });
-          outage = pending;
-        }
-
-        let outcome: string;
-        let detail: string | undefined;
-        const sentAt = Date.now();
-        try {
-          const result = await store.command(code, mover, (_state, occurredAt) => ({ type: "FIRE", actor: mover, coordinate, occurredAt }));
-          outcome = result.ok ? "ok" : result.error.code;
-        } catch (error) {
-          outcome = backend.isUnavailableError(error) ? "unavailable" : `threw ${String(error)}`;
-          detail = `${(error as Error).name}: ${(error as Error).message.slice(0, 120)} after ${Date.now() - sentAt} ms`;
-          console.log(`move ${move} failed: ${detail}`);
-        }
-        attempts.push({ attackerId: mover.id, coordinate, outcome, ...(detail ? { detail } : {}) });
-        if (outcome === "unavailable") unavailable += 1;
-
-        if (outage?.done && Date.now() - outage.startedAt > 1_500) await endOutage(move);
-      }
-
-      await endOutage(0);
-      const final = ok(await untilAvailable(() => store.getState(code)));
-      const label = `game ${gameIndex}: ${JSON.stringify(attempts.filter((attempt) => attempt.outcome !== "ok"))}`;
-      assert.equal(final.winnerPlayerId, first.id, label);
-      assert.equal(final.version, 4 + final.attacks.length, `version and move count disagree; ${label}`);
-      final.attacks.forEach((attack, index) => {
-        assert.equal(attack.attackerId, index % 2 === 0 ? first.id : second.id, `turns out of order at ${index}; ${label}`);
-      });
-      // Every attempt either succeeded or reported that the store was unavailable; nothing was wrongly rejected.
-      for (const attempt of attempts) assert.ok(["ok", "unavailable"].includes(attempt.outcome), `${attempt.outcome}; ${label}`);
-      // No acknowledged move was lost.
-      for (const attempt of attempts.filter((candidate) => candidate.outcome === "ok")) {
-        assert.ok(final.attacks.some((attack) => attack.attackerId === attempt.attackerId && same(attack.coordinate, attempt.coordinate)),
-          `acknowledged move lost: ${JSON.stringify(attempt)}`);
-      }
-      // Every stored move came from an attempt; count the ones whose request reported an error.
-      for (const attack of final.attacks) {
-        const matching = attempts.filter((attempt) => attempt.attackerId === attack.attackerId && same(attempt.coordinate, attack.coordinate));
-        assert.ok(matching.length > 0, `stored move nobody sent: ${JSON.stringify(attack)}`);
-        if (!matching.some((attempt) => attempt.outcome === "ok")) committedDespiteError += 1;
-      }
-    }
+    })]);
   } finally {
     await backend.close();
   }
-  console.log(`leader kills: ${kills}; requests that hit the outage: ${unavailable}; ` +
-    `of those, moves that committed anyway: ${committedDespiteError}`);
-  assert.ok(kills >= MIN_KILLS, `only ${kills} leader kills happened`);
+
+  // A move was in flight when the leader died if it was sent before the kill finished and answered after it began.
+  const inFlight = attempts.filter((attempt) => kills.some((kill) => attempt.sentAt < kill.doneAt && attempt.doneAt > kill.startedAt));
+  const unavailable = attempts.filter((attempt) => attempt.outcome === "unavailable").length;
+  console.log(`games: ${games}; moves: ${attempts.length}; leader kills: ${kills.length}; ` +
+    `moves in flight when a leader died: ${inFlight.length} (${inFlight.filter((attempt) => attempt.outcome === "ok").length} ok, ` +
+    `${inFlight.filter((attempt) => attempt.outcome === "unavailable").length} unavailable); ` +
+    `requests answered unavailable: ${unavailable}; moves committed although reported unavailable: ${committedDespiteError}`);
+  assert.equal(kills.length, KILLS);
+  assert.ok(inFlight.length >= MIN_IN_FLIGHT, `only ${inFlight.length} moves were in flight when a leader died; the run proves little`);
   assert.equal(committedDespiteError, 0, "a move committed although its request reported an error");
 });
