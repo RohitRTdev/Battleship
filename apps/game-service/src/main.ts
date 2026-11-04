@@ -92,6 +92,10 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 });
 
 const httpServer = app.listen(httpPort, "0.0.0.0");
+// Behind the AWS load balancer (idle timeout 60 s), Node must keep idle connections open longer than the balancer
+// does. With Node's 5 s default, the balancer can reuse a connection Node has just closed and answer 502.
+httpServer.keepAliveTimeout = 65_000;
+httpServer.headersTimeout = 66_000;
 await new Promise<void>((resolve, reject) => {
   httpServer.once("listening", resolve);
   httpServer.once("error", reject);
