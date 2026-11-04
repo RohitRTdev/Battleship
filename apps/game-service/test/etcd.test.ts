@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
-import { Etcd3 } from "etcd3";
+import { Etcd3, GRPCCancelledError } from "etcd3";
 import { createEtcdBackend } from "../src/store/etcd/backend.js";
 import { createGame } from "../src/game/index.js";
 import { CONTROL_NAMESPACE, controlKeys, dataKeys as keys, dataNamespace, encode, NAMESPACE } from "../src/store/etcd/keys.js";
@@ -243,6 +243,8 @@ describe("etcd backend", () => {
         const failure = await client.get("x").string().then(() => assert.fail("expected a connection failure"), (caught: unknown) => caught);
         assert.equal(unreachable.isUnavailableError(failure), true, `call ${call} not classified: ${String(failure)}`);
       }
+      // A call cancelled because the library reset its connection is just as unresolved as one that failed outright.
+      assert.equal(unreachable.isUnavailableError(new GRPCCancelledError("1 CANCELLED: Call cancelled")), true);
       assert.equal(unreachable.isUnavailableError(new Error("unrelated")), false);
     } finally {
       client.close();
