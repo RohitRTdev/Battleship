@@ -67,11 +67,11 @@ python scripts/auth_users.py --prod provision-bots
 
 This script provisions the 1,000 bot accounts in `scripts/bot_names.txt` within the cloud deployment.
 
-Then run either one interactive bot or the concurrent game checks:
+Then run either one interactive bot or simulate multiple bots playing in background:
 
 ```sh
 python scripts/play_bot.py --prod
-python scripts/game_bots.py --prod
+python scripts/simutate_game.py --prod
 ```
 Use play_bot.py to let a bot start a game. You may then join the game using the printed game code.
 
