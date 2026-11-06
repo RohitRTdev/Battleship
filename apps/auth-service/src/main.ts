@@ -50,7 +50,6 @@ const deleteUserById = database.prepare<[number]>(
 
 const deleteAllUsers = database.prepare("DELETE FROM users");
 
-
 const app = express();
 app.use(express.json());
 

@@ -33,6 +33,8 @@ export function createPostgresBackend(options: StoreOptions): StoreBackend {
       while (true) {
         try {
           await pool.query("SELECT 1");
+          const settings = await pool.query<{ max_connections: string }>("SHOW max_connections");
+          console.log(`PostgreSQL max_connections: ${settings.rows[0].max_connections}`);
           const migrationClient = await pool.connect();
           try {
             await runMigrations(migrationClient);

@@ -27,7 +27,10 @@ export class ArchiveWorker {
       this.rerun = true;
       return;
     }
-    void this.drain();
+    void this.drain().catch((error) => {
+      console.error("Unexpected match archive worker error", error);
+      this.scheduleRetry(1_000);
+    });
   }
 
   private async drain(): Promise<void> {
