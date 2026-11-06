@@ -116,7 +116,12 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
     updates.onPlayer(playerId, onUpdate);
     response.on("close", onClose);
 
-    const secondRead = await repository.getPlayerState(playerId);
+    // If the read fails, unsubscribe before the error propagates, or the listeners leak.
+    const secondRead = await repository.getPlayerState(playerId).catch((error: unknown) => {
+      updates.offPlayer(playerId, onUpdate);
+      response.off("close", onClose);
+      throw error;
+    });
     if (secondRead.state !== "SEARCHING") {
       updates.offPlayer(playerId, onUpdate);
       response.off("close", onClose);
@@ -252,7 +257,12 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
     const onClose = () => { closed = true; wake?.("closed"); };
     updates.on(initial.value.state.gameId, onUpdate);
     response.on("close", onClose);
-    const secondRead = await readParticipantGame(repository, code, request.user!.id);
+    // If the read fails, unsubscribe before the error propagates, or the listeners leak.
+    const secondRead = await readParticipantGame(repository, code, request.user!.id).catch((error: unknown) => {
+      updates.off(initial.value.state.gameId, onUpdate);
+      response.off("close", onClose);
+      throw error;
+    });
     if (!secondRead.ok) {
       updates.off(initial.value.state.gameId, onUpdate);
       response.off("close", onClose);
