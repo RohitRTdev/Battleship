@@ -40,7 +40,7 @@ _production: dict[str, str] | None = None
 def configure_production(path: Path = Path(".deployment/prod.json")) -> str:
     """Use the deployed Cognito pool and return its public application URL."""
     global _production
-    env_path = Path(".env")
+    env_path = path.parent.parent / ".env"
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
             key, separator, value = line.partition("=")

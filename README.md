@@ -65,7 +65,7 @@ using an authenticated AWS profile:
 python scripts/auth_users.py --prod provision-bots
 ```
 
-This script creates 120 bot accounts within the cloud deployment.
+This script provisions the 1,000 bot accounts in `scripts/bot_names.txt` within the cloud deployment.
 
 Then run either one interactive bot or the concurrent game checks:
 

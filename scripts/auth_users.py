@@ -6,6 +6,7 @@ import argparse
 import os
 import secrets
 import string
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from common.auth_client import (
@@ -72,9 +73,9 @@ Production commands use the AWS profile configured in .env.
         action="store_true",
         help="Skip the confirmation prompt",
     )
-    bots_parser = commands.add_parser("provision-bots", help="Create deterministic Cognito benchmark users")
+    bots_parser = commands.add_parser("provision-bots", help="Create deterministic bot accounts")
     bots_parser.add_argument("--count", type=int, help="Number to create (default: every name in the file)")
-    bots_parser.add_argument("--workers", type=int, default=8, help="Concurrent Cognito requests (default: 8)")
+    bots_parser.add_argument("--workers", type=int, default=16, help="Concurrent provisioning requests (default: 16)")
     bots_parser.add_argument("--names-file", type=Path, default=DEFAULT_NAME_FILE)
     bots_parser.add_argument("--password-seed", default=os.environ.get("BATTLESHIP_BOT_PASSWORD_SEED", "battleship-local-bot-seed"))
     return parser
@@ -144,15 +145,25 @@ def main() -> int:
                 deleted = delete_all_users(args.base_url)
             print(f"Deleted {deleted} user(s).")
         elif args.command == "provision-bots":
-            if not is_production():
-                raise AuthClientError("provision-bots requires --prod")
             names = [line.strip() for line in args.names_file.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#")]
             count = len(names) if args.count is None else args.count
             if count < 1 or count > len(names):
                 raise AuthClientError(f"--count must be between 1 and {len(names)}")
             users = [(username, bot_password(username, args.password_seed)) for username in names[:count]]
-            for completed, username in enumerate(provision_users(users, args.workers), start=1):
-                print(f"[{completed}/{count}] Provisioned {username}")
+            if args.workers < 1:
+                raise AuthClientError("--workers must be at least one")
+            if is_production():
+                results = provision_users(users, args.workers)
+                for completed, username in enumerate(results, start=1):
+                    print(f"[{completed}/{count}] Provisioned {username}")
+            else:
+                with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                    futures = {executor.submit(register, args.base_url, username, password): username
+                               for username, password in users}
+                    for completed, future in enumerate(as_completed(futures), start=1):
+                        created = future.result()
+                        username = futures[future]
+                        print(f"[{completed}/{count}] {'Created' if created else 'Already exists'} {username}")
     except (AuthClientError, OSError) as error:
         print(f"Error: {error}")
         return 1

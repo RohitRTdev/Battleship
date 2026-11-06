@@ -141,6 +141,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--fire-fraction', type=float, default=.5)
     p.add_argument('--timeout', type=positive, default=5)
+    p.add_argument('--dispatch-interval-ms', type=positive, default=5,
+                   help='Maximum interval between request dispatch batches (default 5 ms)')
     p.add_argument('--sample-interval', type=positive, default=15)
     p.add_argument('--setup-workers', type=int, default=8)
     p.add_argument('--cluster', help='ECS cluster name; defaults to PROD_STACK_NAME from .env')
@@ -300,20 +302,25 @@ async def run_level(session, args, players, rate, duration, repetition, index, w
         row['latency_ms'] = (time.monotonic() - sent_mono)*1000
         row['completed_utc'] = utc()
         rows.append(row)
-        writer.writerow(row)
 
     try:
         number = 0
-        while number / rate < duration:
-            due = start_mono + number / rate
-            await asyncio.sleep(max(0, due - time.monotonic()))
-            # Never dispatch a backlog after the level's scheduled end.
-            if time.monotonic() >= start_mono + duration:
+        total = math.ceil(rate * duration)
+        interval = args.dispatch_interval_ms / 1000
+        while number < total:
+            now = time.monotonic()
+            if now >= start_mono + duration:
                 break
-            task = asyncio.create_task(send(number, number/rate))
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-            number += 1
+            # Dispatch all slots due so far together; a single timer is more
+            # reliable than one sleep per request at high rates.
+            due_count = min(total, int((now - start_mono) * rate) + 1)
+            while number < due_count:
+                task = asyncio.create_task(send(number, number / rate))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+                number += 1
+            next_due = start_mono + number / rate
+            await asyncio.sleep(min(interval, max(0, next_due - time.monotonic()) + interval))
         await asyncio.sleep(max(0, start_mono + duration - time.monotonic()))
         actual_duration = time.monotonic() - start_mono
         end = utc()
@@ -324,13 +331,16 @@ async def run_level(session, args, players, rate, duration, repetition, index, w
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
+    writer.writerows(rows)
     raw_file.flush()
     summary = {'repetition': repetition, 'level': index, 'warmup': warmup, 'target_rps': rate,
                'start_utc': start, 'end_utc': end, 'actual_duration_seconds': actual_duration,
+               'scheduled_slots': total, 'undispatched_slots': total - number,
                **summarize(rows, actual_duration)}
     print(f"{end} END {rate:g} req/s: achieved={summary['achieved_rps']:.2f}, "
           f"mean={summary['mean_ms']} ms, p95={summary['p95_ms']} ms, p99={summary['p99_ms']} ms, "
-          f"errors={100*summary['error_rate']:.2f}%", flush=True)
+          f"errors={100*summary['error_rate']:.2f}%, undispatched={summary['undispatched_slots']}, "
+          f"late >10ms={summary['late_over_10ms']}", flush=True)
     return summary
 
 
