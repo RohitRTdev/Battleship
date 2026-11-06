@@ -1,20 +1,18 @@
-# Config 2's store: three-node etcd clusters on EC2, each spread over three availability zones.
-#   store_mode = "etcd":         one cluster ("main") that serves as both the control plane and the data cluster.
-#   store_mode = "etcd-sharded": a control-plane cluster plus etcd_data_cluster_count data clusters (a, b, ...),
-#                                 each on its own three machines, or all on three shared ones with etcd_colocate.
+# Config 2's store (store_mode = "etcd"): three-node etcd clusters on EC2, each spread over three availability zones:
+# a control-plane cluster plus etcd_data_cluster_count data clusters (a, b, ...), each on its own three machines, or
+# all on three shared ones with etcd_colocate.
 # Every node runs the same pinned etcd image as compose.etcd.yaml, with its data on the instance's gp3 root volume.
 # Nodes have fixed private IPs, so membership is static.
 
 locals {
-  etcd_sharded = var.store_mode == "etcd-sharded"
-  etcd_enabled = var.store_mode == "etcd" || local.etcd_sharded
+  etcd_enabled = var.store_mode == "etcd"
   etcd_image   = "quay.io/coreos/etcd:v3.6.15"
   etcd_azs     = slice(data.aws_availability_zones.available.names, 0, 3)
-  # Co-located (sharded only): every cluster shares the same three machines, each cluster on its own pair of ports.
-  etcd_colocate = local.etcd_sharded && var.etcd_colocate
+  # Co-located: every cluster shares the same three machines, each cluster on its own pair of ports.
+  etcd_colocate = var.etcd_colocate
   # Each cluster takes one IP (10 + its position) in each of the three etcd subnets, or, co-located, ports
   # 2379/2380 + 2 * its position on the shared machines.
-  etcd_cluster_ids = !local.etcd_enabled ? [] : local.etcd_sharded ? concat(["control"], [for index in range(var.etcd_data_cluster_count) : substr("abcdefgh", index, 1)]) : ["main"]
+  etcd_cluster_ids = local.etcd_enabled ? concat(["control"], [for index in range(var.etcd_data_cluster_count) : substr("abcdefgh", index, 1)]) : []
   etcd_clusters = [for position, id in local.etcd_cluster_ids : {
     id          = id
     ip_offset   = local.etcd_colocate ? 10 : 10 + position
@@ -28,12 +26,10 @@ locals {
       ip          = cidrhost(cidrsubnet(aws_vpc.main.cidr_block, 8, 19 + pair[1]), pair[0].ip_offset)
       client_port = pair[0].client_port
       peer_port   = pair[0].peer_port
-      # The single cluster keeps the member names it has always had.
-      name  = local.etcd_sharded ? "${pair[0].id}-${pair[1]}" : "etcd-${pair[1]}"
-      token = local.etcd_sharded ? "${var.name}-etcd-${pair[0].id}" : "${var.name}-etcd"
-      # A machine with one etcd keeps the container name and data directory it has always had.
-      container = local.etcd_colocate ? "etcd-${pair[0].id}" : "etcd"
-      data_dir  = local.etcd_colocate ? "/var/lib/etcd-${pair[0].id}" : "/var/lib/etcd"
+      name        = "${pair[0].id}-${pair[1]}"
+      token       = "${var.name}-etcd-${pair[0].id}"
+      container   = local.etcd_colocate ? "etcd-${pair[0].id}" : "etcd"
+      data_dir    = local.etcd_colocate ? "/var/lib/etcd-${pair[0].id}" : "/var/lib/etcd"
     }
   }
   # The machines: one per node, or, co-located, three shared by every cluster.
@@ -49,7 +45,7 @@ locals {
     for key, node in local.etcd_nodes : key => {
       index   = node.index
       ip      = node.ip
-      tag     = local.etcd_sharded ? "${var.name}-etcd-${key}" : "${var.name}-etcd-${node.index}"
+      tag     = "${var.name}-etcd-${key}"
       cluster = node.cluster
       members = [node]
     }
@@ -62,9 +58,9 @@ locals {
   etcd_members = {
     for cluster in local.etcd_clusters : cluster.id => join(",", [for key, node in local.etcd_nodes : "${node.name}=http://${node.ip}:${node.peer_port}" if node.cluster == cluster.id])
   }
-  # What the backends get: the control-plane cluster, and (sharded) the data clusters that seed the registry.
+  # What the backends get: the control-plane cluster, and the data clusters that seed the registry.
   etcd_control_endpoints = local.etcd_enabled ? local.etcd_endpoints[local.etcd_clusters[0].id] : ""
-  etcd_data_clusters     = local.etcd_sharded ? join(";", [for cluster in slice(local.etcd_clusters, 1, length(local.etcd_clusters)) : "${cluster.id}=${local.etcd_endpoints[cluster.id]}"]) : ""
+  etcd_data_clusters     = local.etcd_enabled ? join(";", [for cluster in slice(local.etcd_clusters, 1, length(local.etcd_clusters)) : "${cluster.id}=${local.etcd_endpoints[cluster.id]}"]) : ""
 }
 
 # Public subnets: there is no NAT gateway, and the nodes download the etcd image at boot. Only the security
@@ -141,20 +137,6 @@ data "aws_ssm_parameter" "al2023" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
-# The single cluster's nodes were once indexed 0-2; these keep an existing deployment's nodes in place.
-moved {
-  from = aws_instance.etcd[0]
-  to   = aws_instance.etcd["main-1"]
-}
-moved {
-  from = aws_instance.etcd[1]
-  to   = aws_instance.etcd["main-2"]
-}
-moved {
-  from = aws_instance.etcd[2]
-  to   = aws_instance.etcd["main-3"]
-}
-
 resource "aws_instance" "etcd" {
   for_each               = local.etcd_hosts
   ami                    = data.aws_ssm_parameter.al2023.value
@@ -191,11 +173,11 @@ resource "aws_instance" "etcd" {
 }
 
 output "etcd_endpoints" {
-  description = "The control-plane etcd cluster (in etcd mode, also the one data cluster)."
+  description = "The control-plane etcd cluster."
   value       = local.etcd_control_endpoints
 }
 
 output "etcd_data_clusters" {
-  description = "The data clusters the registry was seeded with (etcd-sharded mode)."
+  description = "The data clusters the registry was seeded with."
   value       = local.etcd_data_clusters
 }

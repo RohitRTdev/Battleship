@@ -51,40 +51,8 @@ run "etcd_mode" {
   command = apply
   variables { store_mode = "etcd" }
   assert {
-    condition     = length(aws_db_instance.main) == 0 && length(aws_instance.etcd) == 3
-    error_message = "etcd mode should create three etcd nodes and no RDS"
-  }
-  assert {
-    condition     = [for node in aws_instance.etcd : node.private_ip] == ["10.42.20.10", "10.42.21.10", "10.42.22.10"]
-    error_message = "etcd nodes should have the fixed private IPs"
-  }
-  assert {
-    condition     = strcontains(aws_ecs_task_definition.backend.container_definitions, "10.42.20.10:2379,10.42.21.10:2379,10.42.22.10:2379") && !strcontains(aws_ecs_task_definition.backend.container_definitions, "PGHOST")
-    error_message = "etcd mode should pass the etcd endpoints and no PG* settings"
-  }
-}
-
-run "etcd_mode_keeps_its_node_identities" {
-  command = apply
-  variables { store_mode = "etcd" }
-  # Same member names, IPs and cluster token as before the sharded layout existed, so the moved blocks reuse the nodes.
-  assert {
-    condition     = keys(aws_instance.etcd) == ["main-1", "main-2", "main-3"]
-    error_message = "the single cluster's nodes should be main-1..3"
-  }
-  assert {
-    condition = strcontains(aws_instance.etcd["main-1"].user_data, "--name etcd-1 ") && strcontains(aws_instance.etcd["main-1"].user_data,
-    "--initial-cluster etcd-1=http://10.42.20.10:2380,etcd-2=http://10.42.21.10:2380,etcd-3=http://10.42.22.10:2380 --initial-cluster-state new --initial-cluster-token battleship-test-etcd ")
-    error_message = "the single cluster's boot script changed"
-  }
-}
-
-run "etcd_sharded_mode" {
-  command = apply
-  variables { store_mode = "etcd-sharded" }
-  assert {
     condition     = length(aws_db_instance.main) == 0 && length(aws_instance.etcd) == 9
-    error_message = "etcd-sharded mode should create a control plane and two data clusters of three nodes each, and no RDS"
+    error_message = "etcd mode should create a control plane and two data clusters of three nodes each, and no RDS"
   }
   assert {
     condition = { for key, node in aws_instance.etcd : key => node.private_ip } == {
@@ -114,10 +82,10 @@ run "etcd_sharded_mode" {
   }
 }
 
-run "etcd_sharded_mode_with_three_data_clusters" {
+run "etcd_mode_with_three_data_clusters" {
   command = plan
   variables {
-    store_mode              = "etcd-sharded"
+    store_mode              = "etcd"
     etcd_data_cluster_count = 3
   }
   assert {
@@ -126,10 +94,10 @@ run "etcd_sharded_mode_with_three_data_clusters" {
   }
 }
 
-run "etcd_sharded_mode_colocated" {
+run "etcd_mode_colocated" {
   command = apply
   variables {
-    store_mode    = "etcd-sharded"
+    store_mode    = "etcd"
     etcd_colocate = true
   }
   assert {

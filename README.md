@@ -49,14 +49,12 @@ Show command usage:
 
 ## Config 2: etcd store
 
-By default the three backend nodes keep games in PostgreSQL (config 1). Config 2 keeps them in a three-node etcd cluster instead, which replicates every write with Raft so the store survives losing any one node:
+By default the three backend nodes keep games in PostgreSQL (config 1). Config 2 keeps them in etcd instead: a three-node control-plane cluster (players, matchmaking, where each game lives) and two three-node data clusters (a and b) that hold the games. Each cluster replicates every write with Raft, so it survives losing any one of its nodes. Each game lives on one data cluster; backends find it through its route on the control plane.
 
 ```sh
 ./setup.sh up etcd     # same app at http://localhost:8000, backends on etcd
 ./setup.sh down etcd
 ```
-
-To split etcd into a control plane (players, matchmaking, game routes) and two data clusters that hold the games, use `./setup.sh up etcd-sharded` (nine etcd nodes; `compose.etcd-sharded.yaml`). Each game lives on one data cluster; backends find it through its route on the control plane.
 
 Data clusters are registered on the control plane. The first backend to start seeds the registry (from `ETCD_DATA_CLUSTERS`, or one cluster `main`); after that, manage clusters with the CLI, here run inside a backend container:
 
@@ -69,7 +67,7 @@ cli activate b                             # undo a drain
 cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
 ```
 
-To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager. `./setup.sh up prod etcd-sharded` deploys the sharded layout instead: a control-plane cluster and two data clusters (nine EC2 nodes; set `etcd_data_cluster_count` for more). On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
+To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by the control-plane cluster and two data clusters on EC2, nine nodes with each cluster spread over three availability zones (set `etcd_data_cluster_count` for more data clusters), reachable through SSM Session Manager. On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
 
 ```sh
 task=$(aws ecs list-tasks --cluster battleship-prod --query 'taskArns[0]' --output text)
@@ -77,22 +75,22 @@ aws ecs execute-command --cluster battleship-prod --task "$task" --container bac
   --command "node apps/game-service/dist/cli/clusters.js list"
 ```
 
-**AWS vCPU limit.** An account on AWS's free plan may run at most 8 vCPUs of regular EC2 instances, and every instance type the free plan allows has 2 vCPUs, so at most 4 machines. The sharded layout's nine machines (18 vCPUs) don't fit: AWS refuses most of them and the backends never start. Such an account must deploy the co-located layout instead, which runs every cluster on the same three machines, each on its own ports (control 2379, a 2381, b 2383):
+**AWS vCPU limit.** An account on AWS's free plan may run at most 8 vCPUs of regular EC2 instances, and every instance type the free plan allows has 2 vCPUs, so at most 4 machines. The nine machines (18 vCPUs) don't fit: AWS refuses most of them and the backends never start. Such an account must deploy the co-located layout instead, which runs every cluster on the same three machines, each on its own ports (control 2379, a 2381, b 2383):
 
 ```sh
-TF_VAR_etcd_colocate=true ./setup.sh up prod etcd-sharded
+TF_VAR_etcd_colocate=true ./setup.sh up prod etcd
 ```
 
-The setting is not saved anywhere, so **pass `TF_VAR_etcd_colocate=true` on every sharded deploy**, including redeploys. A plain `./setup.sh up prod etcd-sharded` against a co-located deployment would delete the three shared machines (and every game on them) to build nine separate ones, which the vCPU limit then refuses, leaving no control plane. The trade-off of co-locating is that losing one machine takes a member from every cluster at once.
+The setting is not saved anywhere, so **pass `TF_VAR_etcd_colocate=true` on every etcd deploy**, including redeploys. A plain `./setup.sh up prod etcd` against a co-located deployment would delete the three shared machines (and every game on them) to build nine separate ones, which the vCPU limit then refuses, leaving no control plane. The trade-off of co-locating is that losing one machine takes a member from every cluster at once.
 
-`compose.etcd.yaml` adds the etcd nodes (data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the cluster and which node is the leader:
+`compose.etcd.yaml` adds the etcd nodes (control plane `etcd-1..3`, data clusters `data-a-1..3` and `data-b-1..3`, data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the control plane and which node is its leader (for a data cluster, use e.g. `battleship-data-a-1` and `data-a-1..3`):
 
 ```sh
 docker exec battleship-etcd-1 etcdctl \
   --endpoints=http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379 endpoint status -w table
 ```
 
-To try a failover, stop the leader (e.g. `docker kill battleship-etcd-1`), keep playing or run `python scripts/game_bots.py`, then bring it back with `docker start battleship-etcd-1`. Requests in flight while the leader dies can fail with a 503 for about a second; no committed move is lost.
+To try a failover, stop a cluster's leader (e.g. `docker kill battleship-etcd-1`), keep playing or run `python scripts/game_bots.py`, then bring it back with `docker start battleship-etcd-1`. Requests in flight while the leader dies can fail with a 503 for about a second; no committed move is lost.
 
 ## Turn timeout
 

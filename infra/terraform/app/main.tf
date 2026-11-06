@@ -271,10 +271,8 @@ resource "aws_ecs_task_definition" "backend" {
       { name = "PGHOST", value = aws_db_instance.main[0].address }, { name = "PGPORT", value = tostring(aws_db_instance.main[0].port) },
       { name = "PGDATABASE", value = "battleship" }, { name = "PGUSER", value = "battleship" }, { name = "PGSSLMODE", value = "verify-full" }
       ] : [
-      { name = "ETCD_ENDPOINTS", value = local.etcd_control_endpoints }
-      ], local.etcd_sharded ? [
+      { name = "ETCD_ENDPOINTS", value = local.etcd_control_endpoints },
       { name = "ETCD_DATA_CLUSTERS", value = local.etcd_data_clusters }
-      ] : [
     ]),
     secrets          = local.postgres_enabled ? [{ name = "PGPASSWORD", valueFrom = "${aws_db_instance.main[0].master_user_secret[0].secret_arn}:password::" }] : [],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.backend.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "backend" } },
