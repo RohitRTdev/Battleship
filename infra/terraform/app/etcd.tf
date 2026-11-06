@@ -1,6 +1,7 @@
 # Config 2's store: three-node etcd clusters on EC2, each spread over three availability zones.
 #   store_mode = "etcd":         one cluster ("main") that serves as both the control plane and the data cluster.
-#   store_mode = "etcd-sharded": a control-plane cluster plus etcd_data_cluster_count data clusters (a, b, ...).
+#   store_mode = "etcd-sharded": a control-plane cluster plus etcd_data_cluster_count data clusters (a, b, ...),
+#                                 each on its own three machines, or all on three shared ones with etcd_colocate.
 # Every node runs the same pinned etcd image as compose.etcd.yaml, with its data on the instance's gp3 root volume.
 # Nodes have fixed private IPs, so membership is static.
 
@@ -9,27 +10,57 @@ locals {
   etcd_enabled = var.store_mode == "etcd" || local.etcd_sharded
   etcd_image   = "quay.io/coreos/etcd:v3.6.15"
   etcd_azs     = slice(data.aws_availability_zones.available.names, 0, 3)
-  # Each cluster takes one IP (10 + its position) in each of the three etcd subnets.
-  etcd_clusters = !local.etcd_enabled ? [] : local.etcd_sharded ? concat(
-    [{ id = "control", ip_offset = 10 }],
-    [for index in range(var.etcd_data_cluster_count) : { id = substr("abcdefgh", index, 1), ip_offset = 11 + index }]
-  ) : [{ id = "main", ip_offset = 10 }]
+  # Co-located (sharded only): every cluster shares the same three machines, each cluster on its own pair of ports.
+  etcd_colocate = local.etcd_sharded && var.etcd_colocate
+  # Each cluster takes one IP (10 + its position) in each of the three etcd subnets, or, co-located, ports
+  # 2379/2380 + 2 * its position on the shared machines.
+  etcd_cluster_ids = !local.etcd_enabled ? [] : local.etcd_sharded ? concat(["control"], [for index in range(var.etcd_data_cluster_count) : substr("abcdefgh", index, 1)]) : ["main"]
+  etcd_clusters = [for position, id in local.etcd_cluster_ids : {
+    id          = id
+    ip_offset   = local.etcd_colocate ? 10 : 10 + position
+    client_port = local.etcd_colocate ? 2379 + 2 * position : 2379
+    peer_port   = local.etcd_colocate ? 2380 + 2 * position : 2380
+  }]
   etcd_nodes = {
     for pair in setproduct(local.etcd_clusters, [1, 2, 3]) : "${pair[0].id}-${pair[1]}" => {
-      cluster = pair[0].id
-      index   = pair[1]
-      ip      = cidrhost(cidrsubnet(aws_vpc.main.cidr_block, 8, 19 + pair[1]), pair[0].ip_offset)
+      cluster     = pair[0].id
+      index       = pair[1]
+      ip          = cidrhost(cidrsubnet(aws_vpc.main.cidr_block, 8, 19 + pair[1]), pair[0].ip_offset)
+      client_port = pair[0].client_port
+      peer_port   = pair[0].peer_port
       # The single cluster keeps the member names it has always had.
       name  = local.etcd_sharded ? "${pair[0].id}-${pair[1]}" : "etcd-${pair[1]}"
       token = local.etcd_sharded ? "${var.name}-etcd-${pair[0].id}" : "${var.name}-etcd"
-      tag   = local.etcd_sharded ? "${var.name}-etcd-${pair[0].id}-${pair[1]}" : "${var.name}-etcd-${pair[1]}"
+      # A machine with one etcd keeps the container name and data directory it has always had.
+      container = local.etcd_colocate ? "etcd-${pair[0].id}" : "etcd"
+      data_dir  = local.etcd_colocate ? "/var/lib/etcd-${pair[0].id}" : "/var/lib/etcd"
     }
   }
+  # The machines: one per node, or, co-located, three shared by every cluster.
+  etcd_hosts = local.etcd_colocate ? {
+    for index in [1, 2, 3] : "shared-${index}" => {
+      index   = index
+      ip      = local.etcd_nodes["control-${index}"].ip
+      tag     = "${var.name}-etcd-shared-${index}"
+      cluster = "shared"
+      members = [for key, node in local.etcd_nodes : node if node.index == index]
+    }
+    } : {
+    for key, node in local.etcd_nodes : key => {
+      index   = node.index
+      ip      = node.ip
+      tag     = local.etcd_sharded ? "${var.name}-etcd-${key}" : "${var.name}-etcd-${node.index}"
+      cluster = node.cluster
+      members = [node]
+    }
+  }
+  etcd_client_ports = distinct([for cluster in local.etcd_clusters : cluster.client_port])
+  etcd_peer_ports   = distinct([for cluster in local.etcd_clusters : cluster.peer_port])
   etcd_endpoints = {
-    for cluster in local.etcd_clusters : cluster.id => join(",", [for key, node in local.etcd_nodes : "${node.ip}:2379" if node.cluster == cluster.id])
+    for cluster in local.etcd_clusters : cluster.id => join(",", [for key, node in local.etcd_nodes : "${node.ip}:${node.client_port}" if node.cluster == cluster.id])
   }
   etcd_members = {
-    for cluster in local.etcd_clusters : cluster.id => join(",", [for key, node in local.etcd_nodes : "${node.name}=http://${node.ip}:2380" if node.cluster == cluster.id])
+    for cluster in local.etcd_clusters : cluster.id => join(",", [for key, node in local.etcd_nodes : "${node.name}=http://${node.ip}:${node.peer_port}" if node.cluster == cluster.id])
   }
   # What the backends get: the control-plane cluster, and (sharded) the data clusters that seed the registry.
   etcd_control_endpoints = local.etcd_enabled ? local.etcd_endpoints[local.etcd_clusters[0].id] : ""
@@ -57,20 +88,26 @@ resource "aws_security_group" "etcd" {
   count       = local.etcd_enabled ? 1 : 0
   name_prefix = "${var.name}-etcd-"
   vpc_id      = aws_vpc.main.id
-  ingress {
-    description     = "etcd clients (game-service, and etcdctl on the nodes themselves)"
-    from_port       = 2379
-    to_port         = 2379
-    protocol        = "tcp"
-    security_groups = [aws_security_group.backend.id]
-    self            = true
+  dynamic "ingress" {
+    for_each = local.etcd_client_ports
+    content {
+      description     = "etcd clients (game-service, and etcdctl on the nodes themselves)"
+      from_port       = ingress.value
+      to_port         = ingress.value
+      protocol        = "tcp"
+      security_groups = [aws_security_group.backend.id]
+      self            = true
+    }
   }
-  ingress {
-    description = "etcd peers"
-    from_port   = 2380
-    to_port     = 2380
-    protocol    = "tcp"
-    self        = true
+  dynamic "ingress" {
+    for_each = local.etcd_peer_ports
+    content {
+      description = "etcd peers"
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      self        = true
+    }
   }
   egress {
     from_port   = 0
@@ -119,7 +156,7 @@ moved {
 }
 
 resource "aws_instance" "etcd" {
-  for_each               = local.etcd_nodes
+  for_each               = local.etcd_hosts
   ami                    = data.aws_ssm_parameter.al2023.value
   instance_type          = var.etcd_instance_type
   subnet_id              = aws_subnet.etcd[each.value.index - 1].id
@@ -132,20 +169,22 @@ resource "aws_instance" "etcd" {
     encrypted   = true
   }
   metadata_options { http_tokens = "required" }
-  # On first boot this starts a new cluster; afterwards Docker restarts the container and etcd ignores the
-  # --initial-* flags because its data directory already exists.
+  # On first boot this starts each etcd member on the machine as a new cluster; afterwards Docker restarts the
+  # containers and etcd ignores the --initial-* flags because its data directory already exists.
   user_data                   = <<-EOT
     #!/bin/bash
     set -euo pipefail
     dnf install -y docker
     systemctl enable --now docker
-    mkdir -p /var/lib/etcd
-    docker run --detach --restart always --name etcd --network host -v /var/lib/etcd:/var/lib/etcd ${local.etcd_image} \
-      etcd --name ${each.value.name} --data-dir /var/lib/etcd \
-      --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://${each.value.ip}:2379 \
-      --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://${each.value.ip}:2380 \
-      --initial-cluster ${local.etcd_members[each.value.cluster]} --initial-cluster-state new --initial-cluster-token ${each.value.token} \
+    %{for node in each.value.members~}
+    mkdir -p ${node.data_dir}
+    docker run --detach --restart always --name ${node.container} --network host -v ${node.data_dir}:${node.data_dir} ${local.etcd_image} \
+      etcd --name ${node.name} --data-dir ${node.data_dir} \
+      --listen-client-urls http://0.0.0.0:${node.client_port} --advertise-client-urls http://${node.ip}:${node.client_port} \
+      --listen-peer-urls http://0.0.0.0:${node.peer_port} --initial-advertise-peer-urls http://${node.ip}:${node.peer_port} \
+      --initial-cluster ${local.etcd_members[node.cluster]} --initial-cluster-state new --initial-cluster-token ${node.token} \
       --auto-compaction-mode periodic --auto-compaction-retention 1h
+    %{endfor~}
   EOT
   user_data_replace_on_change = true
   tags                        = merge(local.tags, { Name = each.value.tag, EtcdCluster = each.value.cluster })

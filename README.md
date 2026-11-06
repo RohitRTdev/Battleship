@@ -69,7 +69,7 @@ cli activate b                             # undo a drain
 cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
 ```
 
-To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager. `./setup.sh up prod etcd-sharded` deploys the sharded layout instead: a control-plane cluster and two data clusters (nine EC2 nodes; set `etcd_data_cluster_count` for more). On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
+To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager. `./setup.sh up prod etcd-sharded` deploys the sharded layout instead: a control-plane cluster and two data clusters (nine EC2 nodes; set `etcd_data_cluster_count` for more). On an account whose vCPU limit can't fit nine machines (the free plan allows 8 vCPUs), `TF_VAR_etcd_colocate=true ./setup.sh up prod etcd-sharded` runs every cluster on the same three machines instead, each on its own ports (control 2379, a 2381, b 2383); a machine failure then hits every cluster at once. On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
 
 ```sh
 task=$(aws ecs list-tasks --cluster battleship-prod --query 'taskArns[0]' --output text)

@@ -126,6 +126,37 @@ run "etcd_sharded_mode_with_three_data_clusters" {
   }
 }
 
+run "etcd_sharded_mode_colocated" {
+  command = apply
+  variables {
+    store_mode    = "etcd-sharded"
+    etcd_colocate = true
+  }
+  assert {
+    condition = { for key, node in aws_instance.etcd : key => node.private_ip } == {
+      "shared-1" = "10.42.20.10", "shared-2" = "10.42.21.10", "shared-3" = "10.42.22.10"
+    }
+    error_message = "co-located clusters should share three machines"
+  }
+  assert {
+    condition = alltrue([
+      strcontains(aws_instance.etcd["shared-2"].user_data, "--name control-2 --data-dir /var/lib/etcd-control "),
+      strcontains(aws_instance.etcd["shared-2"].user_data, "--initial-cluster a-1=http://10.42.20.10:2382,a-2=http://10.42.21.10:2382,a-3=http://10.42.22.10:2382 "),
+      strcontains(aws_instance.etcd["shared-2"].user_data, "--name etcd-b --network host -v /var/lib/etcd-b:/var/lib/etcd-b "),
+      strcontains(aws_instance.etcd["shared-2"].user_data, "--advertise-client-urls http://10.42.21.10:2383 ")
+    ])
+    error_message = "each machine should run one member of every cluster, each cluster on its own ports"
+  }
+  assert {
+    condition     = strcontains(aws_ecs_task_definition.backend.container_definitions, "a=10.42.20.10:2381,10.42.21.10:2381,10.42.22.10:2381;b=10.42.20.10:2383,10.42.21.10:2383,10.42.22.10:2383")
+    error_message = "the backend should get each data cluster on its own port"
+  }
+  assert {
+    condition     = length(aws_security_group.etcd[0].ingress) == 6
+    error_message = "every cluster's client and peer port should be open"
+  }
+}
+
 run "rejects_unknown_mode" {
   command = plan
   variables { store_mode = "valkey" }
