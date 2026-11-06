@@ -75,20 +75,7 @@ python scripts/simutate_game.py --prod
 ```
 Use play_bot.py to let a bot start a game. You may then join the game using the printed game code.
 
-You may check the script doc to see what each one does<br>
-For Example: Run authentication smoke test
-
-```sh
-python scripts/auth_smoke.py
-```
-
-By default, it concurrently registers and logs in 50 uniquely named bots, then prints all registered user IDs, usernames, and creation timestamps.
-
-Run a larger swarm:
-
-```sh
-python scripts/auth_smoke.py --count 120 --workers 40
-```
+You may check the script doc to see what each one does
 
 > [!IMPORTANT]
 > These scripts work with both local and cloud deployments. Add the `--prod`
