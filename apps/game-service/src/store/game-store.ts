@@ -5,7 +5,7 @@ export type CommandResult = { state: GameState; outcome: CommandOutcome };
 
 /** Durable storage for games, matchmaking and presence. */
 export interface GameStore {
-  /** The time used for command timestamps and turn deadlines: the database clock for Postgres, the handling node's clock for etcd. */
+  /** The time used for command timestamps and turn deadlines: the handling node's clock (etcd has none). */
   currentTime(): Promise<string>;
   create(actor: Player): Promise<Result<CommandResult>>;
   /**

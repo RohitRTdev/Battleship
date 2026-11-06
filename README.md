@@ -11,7 +11,7 @@
 Start the development environment:
 
 ```sh
-./setup.sh up
+./setup.sh up etcd
 ```
 
 This creates `.env` when needed, generates a JWT secret, enables development test routes, builds the containers, and waits for them to become healthy. The application is then available at:
@@ -24,7 +24,7 @@ Deploy the production application to AWS:
 
 ```sh
 aws login
-./setup.sh up prod
+./setup.sh up prod etcd
 ```
 
 Following this, you may access the public url mentioned in output log of the script, to play the game
@@ -32,14 +32,14 @@ Following this, you may access the public url mentioned in output log of the scr
 To stop development build:
 
 ```sh
-./setup.sh down
+./setup.sh down etcd
 ```
 
-If you have deployed application (./setup.sh up prod), then you can terminate the resources by calling:
+If you have deployed application (./setup.sh up prod etcd), then you can terminate the resources by calling:
 ```sh
-./setup.sh down prod
+./setup.sh down prod etcd
 ```
-Note: This will also destroy the application database, which means game data and user login data will be gone.
+Note: This will also destroy the etcd clusters and the user pool, which means game data and user login data will be gone.
 
 Show command usage:
 
@@ -47,14 +47,9 @@ Show command usage:
 ./setup.sh help
 ```
 
-## Config 2: etcd store
+## Game store: etcd
 
-By default the three backend nodes keep games in PostgreSQL (config 1). Config 2 keeps them in etcd instead: a three-node control-plane cluster (players, matchmaking, where each game lives) and two three-node data clusters (a and b) that hold the games. Each cluster replicates every write with Raft, so it survives losing any one of its nodes. Each game lives on one data cluster; backends find it through its route on the control plane.
-
-```sh
-./setup.sh up etcd     # same app at http://localhost:8000, backends on etcd
-./setup.sh down etcd
-```
+The three backend nodes keep games in etcd: a three-node control-plane cluster (players, matchmaking, where each game lives) and two three-node data clusters (a and b) that hold the games. Each cluster replicates every write with Raft, so it survives losing any one of its nodes. Each game lives on one data cluster; backends find it through its route on the control plane.
 
 Data clusters are registered on the control plane. The first backend to start seeds the registry (from `ETCD_DATA_CLUSTERS`, or one cluster `main`); after that, manage clusters with the CLI, here run inside a backend container:
 
@@ -67,7 +62,7 @@ cli activate b                             # undo a drain
 cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
 ```
 
-To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by the control-plane cluster and two data clusters on EC2, nine nodes with each cluster spread over three availability zones (set `etcd_data_cluster_count` for more data clusters), reachable through SSM Session Manager. On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
+On AWS (`./setup.sh up prod etcd`), the control-plane cluster and the two data clusters run on EC2: nine nodes, with each cluster spread over three availability zones (set `etcd_data_cluster_count` for more data clusters), reachable through SSM Session Manager. On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
 
 ```sh
 task=$(aws ecs list-tasks --cluster battleship-prod --query 'taskArns[0]' --output text)
@@ -81,9 +76,9 @@ aws ecs execute-command --cluster battleship-prod --task "$task" --container bac
 TF_VAR_etcd_colocate=true ./setup.sh up prod etcd
 ```
 
-The setting is not saved anywhere, so **pass `TF_VAR_etcd_colocate=true` on every etcd deploy**, including redeploys. A plain `./setup.sh up prod etcd` against a co-located deployment would delete the three shared machines (and every game on them) to build nine separate ones, which the vCPU limit then refuses, leaving no control plane. The trade-off of co-locating is that losing one machine takes a member from every cluster at once.
+The setting is not saved anywhere, so **pass `TF_VAR_etcd_colocate=true` on every deploy**, including redeploys. A plain `./setup.sh up prod etcd` against a co-located deployment would delete the three shared machines (and every game on them) to build nine separate ones, which the vCPU limit then refuses, leaving no control plane. The trade-off of co-locating is that losing one machine takes a member from every cluster at once.
 
-`compose.etcd.yaml` adds the etcd nodes (control plane `etcd-1..3`, data clusters `data-a-1..3` and `data-b-1..3`, data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the control plane and which node is its leader (for a data cluster, use e.g. `battleship-data-a-1` and `data-a-1..3`):
+Locally, `compose.yaml` runs the control plane as `etcd-1..3` and the data clusters as `data-a-1..3` and `data-b-1..3`, with their data in `runtime/etcd/`. To see the control plane and which node is its leader (for a data cluster, use e.g. `battleship-data-a-1` and `data-a-1..3`):
 
 ```sh
 docker exec battleship-etcd-1 etcdctl \
@@ -94,7 +89,7 @@ To try a failover, stop a cluster's leader (e.g. `docker kill battleship-etcd-1`
 
 ## Turn timeout
 
-By default, both players share 60 seconds to submit their fleets; the game is cancelled if either player has not submitted in time. Each active turn lasts 30 seconds, with a 500 ms server-side delivery grace period. A player who runs out of time loses the match. To disable the timer for testing, set `DISABLE_TIMEOUT=true` in `.env` before starting development or deploying production. The setting applies to all backend instances; restart the deployment after changing it. Use a fresh database when changing this setting.
+By default, both players share 60 seconds to submit their fleets; the game is cancelled if either player has not submitted in time. Each active turn lasts 30 seconds, with a 500 ms server-side delivery grace period. A player who runs out of time loses the match. To disable the timer for testing, set `DISABLE_TIMEOUT=true` in `.env` before starting development or deploying production. The setting applies to all backend instances; restart the deployment after changing it. Use fresh game data when changing this setting.
 
 ## Tests
 
@@ -102,7 +97,7 @@ By default, both players share 60 seconds to submit their fleets; the game is ca
 npm test
 ```
 
-Runs the game-service store tests against throwaway PostgreSQL and etcd containers (Docker required). Both stores run the same suite in `apps/game-service/test/store-contract.ts`.
+Runs the game-service store tests against throwaway etcd containers (Docker required). The single-cluster and sharded layouts run the same suite in `apps/game-service/test/store-contract.ts`.
 
 ```sh
 npm run test:failover --workspace=@battleship/game-service
@@ -117,7 +112,7 @@ To use the test scripts in production (cloud deployed), first run:
 python -m pip install -r scripts/requirements.txt
 ```
 
-After `./setup.sh up prod` completes, provision the Cognito bot accounts once
+After `./setup.sh up prod etcd` completes, provision the Cognito bot accounts once
 using an authenticated AWS profile:
 
 ```sh

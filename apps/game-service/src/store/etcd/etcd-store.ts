@@ -277,7 +277,7 @@ export class EtcdStore implements GameStore {
     await cluster.kv.put(dataKeys.presence(gameId, playerId)).value(await this.currentTime());
   }
 
-  /** Players seen in the last 10 s are CONNECTED, others seen before are LAGGING, the rest UNKNOWN (as in Postgres). */
+  /** Players seen in the last 10 s are CONNECTED, others seen before are LAGGING, the rest UNKNOWN. */
   async presence(gameId: string, state: GameState): Promise<Record<string, ConnectionStatus>> {
     const cluster = await this.clusterOfGame(gameId);
     const now = Date.parse(await this.currentTime());
@@ -523,7 +523,7 @@ export class EtcdStore implements GameStore {
     }
     if (next.status === "FINISHED") {
       writes.push(kv.delete().prefix(dataKeys.presencePrefix(next.gameId)));
-      // Cancelled games are not archived (as in the Postgres store).
+      // Cancelled games are not archived.
       if (next.completionReason !== "CANCELLED") {
         const job: ArchiveJob = { snapshot: next, attempts: 0, availableAt: next.endedAt ?? new Date().toISOString() };
         writes.push(kv.put(dataKeys.archiveJob(next.gameId)).value(encode(job)));

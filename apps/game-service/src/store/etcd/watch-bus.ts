@@ -12,7 +12,7 @@ function after(prefix: string, kv: IKeyValue): string {
 
 /**
  * Wakes waiting long-polls on this node when a game or a player's state changes on any node, using one etcd watch
- * per key prefix. Plays the role LISTEN/NOTIFY plays for Postgres.
+ * per key prefix.
  */
 /** How long start() waits for the data-cluster watches before going ahead without the slow ones. */
 const CLUSTER_WATCH_WAIT_MS = 2_000;

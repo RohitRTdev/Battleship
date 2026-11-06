@@ -50,7 +50,7 @@ def configure_production(path: Path = Path(".deployment/prod.json")) -> str:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise AuthClientError(
-            f"Could not read {path}; run ./setup.sh up prod first"
+            f"Could not read {path}; run ./setup.sh up prod etcd first"
         ) from error
     required = ("url", "region", "userPoolId", "userPoolClientId")
     if not isinstance(payload, dict) or any(not isinstance(payload.get(key), str) for key in required):

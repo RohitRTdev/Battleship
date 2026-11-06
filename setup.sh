@@ -11,16 +11,6 @@ setup_env() {
     secret=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
     echo "JWT_SECRET=$secret" >> ".env"
   fi
-  if ! grep -q '^POSTGRES_PASSWORD=.' ".env"; then
-    password=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
-    if grep -q '^POSTGRES_PASSWORD=' ".env"; then
-      temporary_env=".env.tmp.$$"
-      sed "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$password/" ".env" > "$temporary_env"
-      mv "$temporary_env" ".env"
-    else
-      echo "POSTGRES_PASSWORD=$password" >> ".env"
-    fi
-  fi
   if grep -q '^ENABLE_TEST_ROUTES=' ".env"; then
     temporary_env=".env.tmp.$$"
     sed 's/^ENABLE_TEST_ROUTES=.*/ENABLE_TEST_ROUTES=true/' ".env" > "$temporary_env"
@@ -109,7 +99,7 @@ up_prod() {
 
   echo "Deploying AWS application resources..."
   terraform -chdir=infra/terraform/app init -input=false
-  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="store_mode=$store_mode" -var="backend_image=$backend_image"
+  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=$backend_image"
 
   public_url=$(terraform -chdir=infra/terraform/app output -raw public_url)
   user_pool_id=$(terraform -chdir=infra/terraform/app output -raw cognito_user_pool_id)
@@ -132,7 +122,7 @@ down_prod() {
     echo "No local production Terraform state was found; refusing an unscoped deletion." >&2
     exit 1
   fi
-  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="store_mode=$store_mode" -var="backend_image=destroy"
+  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=destroy"
   terraform -chdir=infra/terraform/bootstrap destroy -auto-approve -input=false $(terraform_args)
   rm -rf .deployment
   echo "Production resources and data were deleted."
@@ -147,31 +137,22 @@ reset_dev() {
 
 usage() {
   echo "Usage:"
-  echo "  ./setup.sh up          Start development at localhost:8000"
-  echo "  ./setup.sh down        Stop development"
-  echo "  ./setup.sh up etcd     Start development with the etcd store (config 2: a control plane and two data clusters)"
-  echo "  ./setup.sh down etcd   Stop the etcd development environment"
-  echo "  ./setup.sh up prod     Build and deploy to AWS"
-  echo "  ./setup.sh down prod   Permanently delete the AWS deployment"
-  echo "  ./setup.sh up prod etcd     Deploy to AWS with the etcd store (config 2; see README for TF_VAR_etcd_colocate)"
-  echo "  ./setup.sh down prod etcd   Permanently delete the etcd AWS deployment"
+  echo "  ./setup.sh up etcd          Start development at localhost:8000 (etcd store)"
+  echo "  ./setup.sh down etcd        Stop development"
+  echo "  ./setup.sh up prod etcd     Build and deploy to AWS (see README for TF_VAR_etcd_colocate)"
+  echo "  ./setup.sh down prod etcd   Permanently delete the AWS deployment"
   echo "  ./setup.sh reset       Delete generated development data"
 }
 
 command=${1:-help}
 environment=${2:-dev}
-# Store for the AWS deployment: postgres (config 1, RDS) or etcd (config 2: a control-plane cluster plus two data
-# clusters, nine EC2 nodes).
-store_mode=${3:-postgres}
-case "$store_mode" in postgres | etcd) ;; *) usage >&2; exit 1 ;; esac
-case "$command:$environment" in
-  up:dev) up_dev ;;
-  down:dev) down_dev ;;
-  up:etcd) export COMPOSE_FILE=compose.yaml:compose.etcd.yaml; up_dev ;;
-  down:etcd) export COMPOSE_FILE=compose.yaml:compose.etcd.yaml; down_dev ;;
-  up:prod) up_prod ;;
-  down:prod) down_prod ;;
-  reset:dev) reset_dev ;;
-  help:dev) usage ;;
+store=${3:-}
+case "$command:$environment:$store" in
+  up:etcd:) up_dev ;;
+  down:etcd:) down_dev ;;
+  up:prod:etcd) up_prod ;;
+  down:prod:etcd) down_prod ;;
+  reset:dev:) reset_dev ;;
+  help:dev:) usage ;;
   *) usage >&2; exit 1 ;;
 esac

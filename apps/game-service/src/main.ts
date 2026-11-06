@@ -1,7 +1,7 @@
 import { authorizeUser, createTokenVerifierFromEnvironment } from "@battleship/auth-token";
 import express from "express";
 import path from "node:path";
-import { createStoreBackend } from "./store/index.js";
+import { createEtcdBackend } from "./store/etcd/backend.js";
 import { createGameRouter } from "./http/game-router.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
@@ -9,7 +9,6 @@ import { ArchiveWorker } from "./archive/archive-worker.js";
 const serviceName = process.env.SERVICE_NAME ?? "game-service";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
 const httpPort = Number(process.env.HTTP_PORT ?? 8080);
-const storeMode = process.env.STORE_MODE ?? "postgres";
 const tokenVerifier = await createTokenVerifierFromEnvironment();
 const production = process.env.APP_ENV === "prod";
 const frontendDirectory = path.resolve(process.cwd(), "apps/frontend/dist");
@@ -21,7 +20,7 @@ const timeoutEnabled = disableTimeout === "false";
 let ready = false;
 let shuttingDown = false;
 
-const backend = createStoreBackend(storeMode, { timeoutEnabled });
+const backend = createEtcdBackend({ timeoutEnabled });
 const { store, updates } = backend;
 let timeoutWorkerRunning = false;
 let timeoutWorkerClosed = false;
@@ -102,7 +101,7 @@ await new Promise<void>((resolve, reject) => {
 });
 ready = true;
 
-console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort} (store: ${storeMode})`);
+console.log(`${serviceName}/${nodeId} ready on HTTP ${httpPort}`);
 
 function shutdown(): void {
   if (shuttingDown) {

@@ -16,7 +16,6 @@ RUN npm run build --workspace=@battleship/auth-token \
 CMD ["npm", "run", "dev", "--workspace=@battleship/game-service"]
 
 FROM dependencies AS build
-ADD --chmod=0444 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /workspace/rds-global-bundle.pem
 COPY tsconfig.base.json ./
 COPY packages/auth-token packages/auth-token
 COPY packages/game-contract packages/game-contract
@@ -40,8 +39,6 @@ RUN npm run build --workspace=@battleship/game-contract \
 FROM node:24-bookworm-slim AS production
 WORKDIR /workspace
 ENV NODE_ENV=production
-ENV NODE_EXTRA_CA_CERTS=/workspace/rds-global-bundle.pem
-COPY --from=build /workspace/rds-global-bundle.pem /workspace/rds-global-bundle.pem
 COPY --from=build /workspace/node_modules node_modules
 COPY --from=build /workspace/apps/game-service/package.json apps/game-service/package.json
 COPY --from=build /workspace/apps/game-service/dist apps/game-service/dist

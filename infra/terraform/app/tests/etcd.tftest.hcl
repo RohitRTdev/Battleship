@@ -23,9 +23,6 @@ mock_provider "aws" {
   mock_resource "aws_s3_bucket" {
     defaults = { arn = "arn:aws:s3:::mock-bucket" }
   }
-  mock_resource "aws_db_instance" {
-    defaults = { master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:ap-south-1:123456789012:secret:db" }] }
-  }
 }
 
 variables {
@@ -34,25 +31,11 @@ variables {
   backend_image = "example/backend:test"
 }
 
-run "postgres_mode" {
+run "default_layout" {
   command = apply
-  variables { store_mode = "postgres" }
   assert {
-    condition     = length(aws_db_instance.main) == 1 && length(aws_instance.etcd) == 0
-    error_message = "postgres mode should create RDS and no etcd nodes"
-  }
-  assert {
-    condition     = strcontains(aws_ecs_task_definition.backend.container_definitions, "PGHOST") && !strcontains(aws_ecs_task_definition.backend.container_definitions, "ETCD_ENDPOINTS")
-    error_message = "postgres mode should pass PG* settings, not etcd endpoints"
-  }
-}
-
-run "etcd_mode" {
-  command = apply
-  variables { store_mode = "etcd" }
-  assert {
-    condition     = length(aws_db_instance.main) == 0 && length(aws_instance.etcd) == 9
-    error_message = "etcd mode should create a control plane and two data clusters of three nodes each, and no RDS"
+    condition     = length(aws_instance.etcd) == 9
+    error_message = "there should be a control plane and two data clusters of three nodes each"
   }
   assert {
     condition = { for key, node in aws_instance.etcd : key => node.private_ip } == {
@@ -69,12 +52,10 @@ run "etcd_mode" {
   }
   assert {
     condition = alltrue([
-      strcontains(aws_ecs_task_definition.backend.container_definitions, "\"name\":\"STORE_MODE\",\"value\":\"etcd\""),
       strcontains(aws_ecs_task_definition.backend.container_definitions, "10.42.20.10:2379,10.42.21.10:2379,10.42.22.10:2379"),
-      strcontains(aws_ecs_task_definition.backend.container_definitions, "a=10.42.20.11:2379,10.42.21.11:2379,10.42.22.11:2379;b=10.42.20.12:2379,10.42.21.12:2379,10.42.22.12:2379"),
-      !strcontains(aws_ecs_task_definition.backend.container_definitions, "PGHOST")
+      strcontains(aws_ecs_task_definition.backend.container_definitions, "a=10.42.20.11:2379,10.42.21.11:2379,10.42.22.11:2379;b=10.42.20.12:2379,10.42.21.12:2379,10.42.22.12:2379")
     ])
-    error_message = "the backend should get STORE_MODE=etcd, the control plane and both data clusters"
+    error_message = "the backend should get the control plane and both data clusters"
   }
   assert {
     condition     = aws_ecs_service.backend.enable_execute_command
@@ -82,24 +63,18 @@ run "etcd_mode" {
   }
 }
 
-run "etcd_mode_with_three_data_clusters" {
+run "three_data_clusters" {
   command = plan
-  variables {
-    store_mode              = "etcd"
-    etcd_data_cluster_count = 3
-  }
+  variables { etcd_data_cluster_count = 3 }
   assert {
     condition     = length(aws_instance.etcd) == 12 && contains(keys(aws_instance.etcd), "c-3")
     error_message = "three data clusters should add c-1..3"
   }
 }
 
-run "etcd_mode_colocated" {
+run "colocated" {
   command = apply
-  variables {
-    store_mode    = "etcd"
-    etcd_colocate = true
-  }
+  variables { etcd_colocate = true }
   assert {
     condition = { for key, node in aws_instance.etcd : key => node.private_ip } == {
       "shared-1" = "10.42.20.10", "shared-2" = "10.42.21.10", "shared-3" = "10.42.22.10"
@@ -120,13 +95,7 @@ run "etcd_mode_colocated" {
     error_message = "the backend should get each data cluster on its own port"
   }
   assert {
-    condition     = length(aws_security_group.etcd[0].ingress) == 6
+    condition     = length(aws_security_group.etcd.ingress) == 6
     error_message = "every cluster's client and peer port should be open"
   }
-}
-
-run "rejects_unknown_mode" {
-  command = plan
-  variables { store_mode = "valkey" }
-  expect_failures = [var.store_mode]
 }

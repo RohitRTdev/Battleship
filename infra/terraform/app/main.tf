@@ -10,9 +10,8 @@ data "aws_availability_zones" "available" { state = "available" }
 data "aws_caller_identity" "current" {}
 
 locals {
-  azs              = slice(data.aws_availability_zones.available.names, 0, 2)
-  tags             = { Project = var.name, ManagedBy = "terraform" }
-  postgres_enabled = var.store_mode == "postgres"
+  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
+  tags = { Project = var.name, ManagedBy = "terraform" }
 }
 
 resource "aws_s3_bucket" "match_archive" {
@@ -55,14 +54,6 @@ resource "aws_subnet" "public" {
   cidr_block              = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
   map_public_ip_on_launch = true
   tags                    = merge(local.tags, { Name = "${var.name}-public-${count.index + 1}" })
-}
-
-resource "aws_subnet" "database" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  availability_zone = local.azs[count.index]
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)
-  tags              = merge(local.tags, { Name = "${var.name}-database-${count.index + 1}" })
 }
 
 resource "aws_route_table" "public" { vpc_id = aws_vpc.main.id }
@@ -113,51 +104,6 @@ resource "aws_security_group" "backend" {
   tags = local.tags
 }
 
-resource "aws_security_group" "database" {
-  name_prefix = "${var.name}-database-"
-  vpc_id      = aws_vpc.main.id
-  ingress {
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.backend.id]
-  }
-  tags = local.tags
-}
-
-resource "aws_db_subnet_group" "main" {
-  name       = var.name
-  subnet_ids = aws_subnet.database[*].id
-  tags       = local.tags
-}
-# RDS exists only in Postgres mode. The moved block keeps an existing database when the resource gained `count`.
-moved {
-  from = aws_db_instance.main
-  to   = aws_db_instance.main[0]
-}
-resource "aws_db_instance" "main" {
-  count                       = local.postgres_enabled ? 1 : 0
-  identifier                  = var.name
-  engine                      = "postgres"
-  instance_class              = "db.t3.micro"
-  allocated_storage           = 20
-  max_allocated_storage       = 50
-  storage_type                = "gp2"
-  storage_encrypted           = true
-  db_name                     = "battleship"
-  username                    = "battleship"
-  manage_master_user_password = true
-  db_subnet_group_name        = aws_db_subnet_group.main.name
-  vpc_security_group_ids      = [aws_security_group.database.id]
-  publicly_accessible         = false
-  multi_az                    = false
-  backup_retention_period     = 1
-  skip_final_snapshot         = true
-  deletion_protection         = false
-  apply_immediately           = true
-  tags                        = local.tags
-}
-
 resource "aws_cognito_user_pool" "main" {
   name = var.name
   username_configuration { case_sensitive = false }
@@ -204,15 +150,6 @@ resource "aws_iam_role" "execution" {
 resource "aws_iam_role_policy_attachment" "execution" {
   role       = aws_iam_role.execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-moved {
-  from = aws_iam_role_policy.database_secret
-  to   = aws_iam_role_policy.database_secret[0]
-}
-resource "aws_iam_role_policy" "database_secret" {
-  count  = local.postgres_enabled ? 1 : 0
-  role   = aws_iam_role.execution.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = aws_db_instance.main[0].master_user_secret[0].secret_arn }] })
 }
 resource "aws_iam_role" "task" {
   name               = "${var.name}-task"
@@ -262,19 +199,12 @@ resource "aws_ecs_task_definition" "backend" {
   container_definitions = jsonencode([{
     name         = "backend", image = var.backend_image, essential = true,
     portMappings = [{ containerPort = 8080, protocol = "tcp" }],
-    environment = concat([
+    environment = [
       { name = "APP_ENV", value = "prod" }, { name = "DISABLE_TIMEOUT", value = tostring(var.disable_timeout) }, { name = "HTTP_PORT", value = "8080" },
       { name = "AWS_REGION", value = var.aws_region }, { name = "COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.main.id },
       { name = "COGNITO_APP_CLIENT_ID", value = aws_cognito_user_pool_client.web.id }, { name = "MATCH_ARCHIVE_BUCKET", value = aws_s3_bucket.match_archive.id },
-      { name = "STORE_MODE", value = local.postgres_enabled ? "postgres" : "etcd" }
-      ], local.postgres_enabled ? [
-      { name = "PGHOST", value = aws_db_instance.main[0].address }, { name = "PGPORT", value = tostring(aws_db_instance.main[0].port) },
-      { name = "PGDATABASE", value = "battleship" }, { name = "PGUSER", value = "battleship" }, { name = "PGSSLMODE", value = "verify-full" }
-      ] : [
-      { name = "ETCD_ENDPOINTS", value = local.etcd_control_endpoints },
-      { name = "ETCD_DATA_CLUSTERS", value = local.etcd_data_clusters }
-    ]),
-    secrets          = local.postgres_enabled ? [{ name = "PGPASSWORD", valueFrom = "${aws_db_instance.main[0].master_user_secret[0].secret_arn}:password::" }] : [],
+      { name = "ETCD_ENDPOINTS", value = local.etcd_control_endpoints }, { name = "ETCD_DATA_CLUSTERS", value = local.etcd_data_clusters }
+    ],
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.backend.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "backend" } },
     healthCheck      = { command = ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""], interval = 30, timeout = 5, retries = 3, startPeriod = 60 }
   }])

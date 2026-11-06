@@ -1,18 +1,17 @@
-# Config 2's store (store_mode = "etcd"): three-node etcd clusters on EC2, each spread over three availability zones:
+# The game store: three-node etcd clusters on EC2, each spread over three availability zones:
 # a control-plane cluster plus etcd_data_cluster_count data clusters (a, b, ...), each on its own three machines, or
 # all on three shared ones with etcd_colocate.
-# Every node runs the same pinned etcd image as compose.etcd.yaml, with its data on the instance's gp3 root volume.
+# Every node runs the same pinned etcd image as compose.yaml, with its data on the instance's gp3 root volume.
 # Nodes have fixed private IPs, so membership is static.
 
 locals {
-  etcd_enabled = var.store_mode == "etcd"
-  etcd_image   = "quay.io/coreos/etcd:v3.6.15"
-  etcd_azs     = slice(data.aws_availability_zones.available.names, 0, 3)
+  etcd_image = "quay.io/coreos/etcd:v3.6.15"
+  etcd_azs   = slice(data.aws_availability_zones.available.names, 0, 3)
   # Co-located: every cluster shares the same three machines, each cluster on its own pair of ports.
   etcd_colocate = var.etcd_colocate
   # Each cluster takes one IP (10 + its position) in each of the three etcd subnets, or, co-located, ports
   # 2379/2380 + 2 * its position on the shared machines.
-  etcd_cluster_ids = local.etcd_enabled ? concat(["control"], [for index in range(var.etcd_data_cluster_count) : substr("abcdefgh", index, 1)]) : []
+  etcd_cluster_ids = concat(["control"], [for index in range(var.etcd_data_cluster_count) : substr("abcdefgh", index, 1)])
   etcd_clusters = [for position, id in local.etcd_cluster_ids : {
     id          = id
     ip_offset   = local.etcd_colocate ? 10 : 10 + position
@@ -59,14 +58,14 @@ locals {
     for cluster in local.etcd_clusters : cluster.id => join(",", [for key, node in local.etcd_nodes : "${node.name}=http://${node.ip}:${node.peer_port}" if node.cluster == cluster.id])
   }
   # What the backends get: the control-plane cluster, and the data clusters that seed the registry.
-  etcd_control_endpoints = local.etcd_enabled ? local.etcd_endpoints[local.etcd_clusters[0].id] : ""
-  etcd_data_clusters     = local.etcd_enabled ? join(";", [for cluster in slice(local.etcd_clusters, 1, length(local.etcd_clusters)) : "${cluster.id}=${local.etcd_endpoints[cluster.id]}"]) : ""
+  etcd_control_endpoints = local.etcd_endpoints[local.etcd_clusters[0].id]
+  etcd_data_clusters     = join(";", [for cluster in slice(local.etcd_clusters, 1, length(local.etcd_clusters)) : "${cluster.id}=${local.etcd_endpoints[cluster.id]}"])
 }
 
 # Public subnets: there is no NAT gateway, and the nodes download the etcd image at boot. Only the security
 # group below can reach them.
 resource "aws_subnet" "etcd" {
-  count                   = local.etcd_enabled ? 3 : 0
+  count                   = 3
   vpc_id                  = aws_vpc.main.id
   availability_zone       = local.etcd_azs[count.index]
   cidr_block              = cidrsubnet(aws_vpc.main.cidr_block, 8, 20 + count.index)
@@ -75,13 +74,12 @@ resource "aws_subnet" "etcd" {
 }
 
 resource "aws_route_table_association" "etcd" {
-  count          = local.etcd_enabled ? 3 : 0
+  count          = 3
   subnet_id      = aws_subnet.etcd[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
 resource "aws_security_group" "etcd" {
-  count       = local.etcd_enabled ? 1 : 0
   name_prefix = "${var.name}-etcd-"
   vpc_id      = aws_vpc.main.id
   dynamic "ingress" {
@@ -116,21 +114,18 @@ resource "aws_security_group" "etcd" {
 
 # No SSH: shell access (for example, to stop a node in a failover experiment) is through SSM Session Manager.
 resource "aws_iam_role" "etcd" {
-  count              = local.etcd_enabled ? 1 : 0
   name               = "${var.name}-etcd"
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }] })
   tags               = local.tags
 }
 resource "aws_iam_role_policy_attachment" "etcd_ssm" {
-  count      = local.etcd_enabled ? 1 : 0
-  role       = aws_iam_role.etcd[0].name
+  role       = aws_iam_role.etcd.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 resource "aws_iam_instance_profile" "etcd" {
-  count = local.etcd_enabled ? 1 : 0
-  name  = "${var.name}-etcd"
-  role  = aws_iam_role.etcd[0].name
-  tags  = local.tags
+  name = "${var.name}-etcd"
+  role = aws_iam_role.etcd.name
+  tags = local.tags
 }
 
 data "aws_ssm_parameter" "al2023" {
@@ -143,8 +138,8 @@ resource "aws_instance" "etcd" {
   instance_type          = var.etcd_instance_type
   subnet_id              = aws_subnet.etcd[each.value.index - 1].id
   private_ip             = each.value.ip
-  vpc_security_group_ids = [aws_security_group.etcd[0].id]
-  iam_instance_profile   = aws_iam_instance_profile.etcd[0].name
+  vpc_security_group_ids = [aws_security_group.etcd.id]
+  iam_instance_profile   = aws_iam_instance_profile.etcd.name
   root_block_device {
     volume_type = "gp3"
     volume_size = 20
