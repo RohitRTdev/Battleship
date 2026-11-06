@@ -69,13 +69,21 @@ cli activate b                             # undo a drain
 cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
 ```
 
-To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager. `./setup.sh up prod etcd-sharded` deploys the sharded layout instead: a control-plane cluster and two data clusters (nine EC2 nodes; set `etcd_data_cluster_count` for more). On an account whose vCPU limit can't fit nine machines (the free plan allows 8 vCPUs), `TF_VAR_etcd_colocate=true ./setup.sh up prod etcd-sharded` runs every cluster on the same three machines instead, each on its own ports (control 2379, a 2381, b 2383); a machine failure then hits every cluster at once. On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
+To deploy config 2 to AWS, use `./setup.sh up prod etcd` (and `./setup.sh down prod etcd` to delete it): RDS is replaced by three etcd EC2 nodes, one per availability zone, reachable through SSM Session Manager. `./setup.sh up prod etcd-sharded` deploys the sharded layout instead: a control-plane cluster and two data clusters (nine EC2 nodes; set `etcd_data_cluster_count` for more). On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
 
 ```sh
 task=$(aws ecs list-tasks --cluster battleship-prod --query 'taskArns[0]' --output text)
 aws ecs execute-command --cluster battleship-prod --task "$task" --container backend --interactive \
   --command "node apps/game-service/dist/cli/clusters.js list"
 ```
+
+**AWS vCPU limit.** An account on AWS's free plan may run at most 8 vCPUs of regular EC2 instances, and every instance type the free plan allows has 2 vCPUs, so at most 4 machines. The sharded layout's nine machines (18 vCPUs) don't fit: AWS refuses most of them and the backends never start. Such an account must deploy the co-located layout instead, which runs every cluster on the same three machines, each on its own ports (control 2379, a 2381, b 2383):
+
+```sh
+TF_VAR_etcd_colocate=true ./setup.sh up prod etcd-sharded
+```
+
+The setting is not saved anywhere, so **pass `TF_VAR_etcd_colocate=true` on every sharded deploy**, including redeploys. A plain `./setup.sh up prod etcd-sharded` against a co-located deployment would delete the three shared machines (and every game on them) to build nine separate ones, which the vCPU limit then refuses, leaving no control plane. The trade-off of co-locating is that losing one machine takes a member from every cluster at once.
 
 `compose.etcd.yaml` adds the etcd nodes (data in `runtime/etcd/`) and sets `STORE_MODE=etcd` on the backends. Switching between `./setup.sh up` and `./setup.sh up etcd` recreates the backends; each config keeps its own data. To see the cluster and which node is the leader:
 
