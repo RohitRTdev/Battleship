@@ -130,6 +130,44 @@ describe("etcd data clusters", () => {
     }
   });
 
+  test("a data cluster that is down takes only its own games with it", { timeout: 60_000 }, async () => {
+    const container = process.env.TEST_ETCD_DATA_B_CONTAINER;
+    assert.ok(container, "TEST_ETCD_DATA_B_CONTAINER is required");
+    const docker = (...args: string[]) => promisify(execFile)("docker", args);
+    const controlKv = admins[0].namespace(CONTROL_NAMESPACE);
+    const clusterOf = async (code: string) => decode<Route>((await controlKv.get(controlKeys.route(code)).string())!).clusterId;
+    const nodes: StoreBackend[] = [shardedBackend()];
+    await nodes[0].start();
+    let paused = false;
+    try {
+      await Promise.all(admins.map((admin) => admin.namespace(NAMESPACE).delete().all()));
+      await docker("pause", container);
+      paused = true;
+
+      // Nodes stay healthy, and a node can still start.
+      assert.equal(await nodes[0].checkHealth(), true);
+      nodes.push(shardedBackend());
+      await nodes[1].start();
+      assert.equal(await nodes[1].checkHealth(), true);
+
+      // Once the probes notice, new games go to the cluster that is up, and they can be played.
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      const first: Player = { id: "split-first", username: "first" };
+      const second: Player = { id: "split-second", username: "second" };
+      for (let index = 0; index < 10; index += 1) {
+        const node = nodes[index % nodes.length];
+        const code = ok(await node.store.create({ id: `split-${index}`, username: `split${index}` })).state.gameCode;
+        assert.equal(await clusterOf(code), "a");
+      }
+      const code = ok(await nodes[0].store.create(first)).state.gameCode;
+      ok(await nodes[1].store.command(code, second, (occurredAt) => ({ type: "JOIN_GAME", actor: second, occurredAt })));
+      assert.equal(ok(await nodes[0].store.getState(code)).status, "PLACEMENT");
+    } finally {
+      if (paused) await docker("unpause", container);
+      for (const node of nodes) await node.close();
+    }
+  });
+
   test("clusters can be drained, removed and registered while nodes run", { timeout: 120_000 }, async () => {
     const run = promisify(execFile);
     const cli = (...args: string[]) => run("npx", ["tsx", "src/cli/clusters.ts", ...args], { env: { ...process.env, ETCD_ENDPOINTS: control } });

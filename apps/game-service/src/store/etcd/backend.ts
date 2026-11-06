@@ -8,6 +8,7 @@ import { EtcdUpdateBus } from "./watch-bus.js";
 import { CONTROL_NAMESPACE, controlKeys, dataKeys } from "./keys.js";
 
 const CALL_TIMEOUT_MS = 2_000;
+const REACHABILITY_INTERVAL_MS = 2_000;
 
 function hosts(list: string): string[] {
   return list.split(",").map((endpoint) => endpoint.trim()).filter(Boolean);
@@ -50,11 +51,21 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
   const updates = new EtcdUpdateBus(control, clusters);
   let ready = false;
   let following = false;
+  let reachabilityTimer: NodeJS.Timeout | null = null;
 
-  // A linearizable read needs a quorum, so it fails while a cluster has no leader.
+  // A linearizable read needs a quorum, so it fails while a cluster has no leader. A node's health depends on the
+  // control plane alone: a data cluster that is down only affects its own games, so it must not take every node
+  // out of service. Data clusters are probed separately, so new games are placed on ones that answer.
   async function probe(): Promise<void> {
     await control.get(controlKeys.health).string();
-    await Promise.all(clusters.list().map((cluster) => cluster.kv.get(dataKeys.health).string()));
+  }
+
+  async function probeDataClusters(): Promise<void> {
+    await Promise.all(clusters.list().map(async (cluster) => {
+      const reachable = await cluster.kv.get(dataKeys.health).string().then(() => true, () => false);
+      if (reachable !== cluster.reachable) console.warn(`etcd data cluster ${cluster.id} is ${reachable ? "reachable again" : "unreachable"}`);
+      cluster.reachable = reachable;
+    }));
   }
 
   return {
@@ -71,8 +82,9 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
             await clusters.follow(control);
             following = true;
           }
-          await probe();
+          await probeDataClusters();
           await updates.start();
+          reachabilityTimer ??= setInterval(() => void probeDataClusters(), REACHABILITY_INTERVAL_MS).unref();
           ready = true;
           return;
         } catch (error) {
@@ -100,6 +112,7 @@ export function createEtcdBackend(options: StoreOptions): StoreBackend {
 
     async close() {
       ready = false;
+      if (reachabilityTimer) clearInterval(reachabilityTimer);
       await updates.close().catch(() => undefined);
       await clusters.close();
       client.close();

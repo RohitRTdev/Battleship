@@ -9,8 +9,11 @@ import { controlKeys, dataKeys, dataNamespace, decode, encode } from "./keys.js"
 export type ClusterState = "ACTIVE" | "DRAINING" | "REMOVED";
 export type ClusterRecord = { endpoints: string[]; state: ClusterState };
 
-/** One connected data cluster: the id routes refer to, its state, and the namespace its per-game keys live in. */
-export type DataCluster = { id: string; state: ClusterState; kv: Namespace };
+/**
+ * One connected data cluster: the id routes refer to, its state, the namespace its per-game keys live in, and
+ * whether its last probe reached a quorum (see the etcd backend).
+ */
+export type DataCluster = { id: string; state: ClusterState; kv: Namespace; reachable: boolean };
 
 function clusterId(kv: IKeyValue): string {
   const key = kv.key.toString();
@@ -59,6 +62,13 @@ export class ClusterSet {
     return this.list().filter((cluster) => cluster.state === "ACTIVE");
   }
 
+  /** Where new games can go: ACTIVE clusters that answered their last probe, or every ACTIVE one if none did. */
+  placeable(): DataCluster[] {
+    const active = this.active();
+    const reachable = active.filter((cluster) => cluster.reachable);
+    return reachable.length > 0 ? reachable : active;
+  }
+
   get(id: string): DataCluster | undefined {
     return this.members.get(id);
   }
@@ -85,7 +95,7 @@ export class ClusterSet {
       return;
     }
     const client = this.connect(record.endpoints);
-    const cluster = { id, state: record.state, kv: client.namespace(dataNamespace(id)), client };
+    const cluster = { id, state: record.state, kv: client.namespace(dataNamespace(id)), reachable: true, client };
     this.members.set(id, cluster);
     for (const listener of this.addedListeners) listener(cluster);
   }

@@ -21,11 +21,18 @@ export class EtcdArchiveOutbox implements ArchiveOutbox {
     private readonly updates: EtcdUpdateBus
   ) {}
 
+  /** Tries each data cluster in turn; one that is down is skipped, and its error raised only if no job was found. */
   async processNext(archive: (snapshot: GameState) => Promise<void>): Promise<ArchiveJobResult> {
+    let failure: unknown;
     for (const cluster of this.clusters.list()) {
-      const result = await this.processNextIn(cluster.kv, archive);
-      if (result.kind !== "empty") return result;
+      try {
+        const result = await this.processNextIn(cluster.kv, archive);
+        if (result.kind !== "empty") return result;
+      } catch (error) {
+        failure ??= error;
+      }
     }
+    if (failure !== undefined) throw failure;
     return { kind: "empty" };
   }
 

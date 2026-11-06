@@ -292,14 +292,23 @@ export class EtcdStore implements GameStore {
     return presence;
   }
 
-  /** Expires one overdue game, trying each data cluster (draining ones too) in turn. */
+  /**
+   * Expires one overdue game, trying each data cluster (draining ones too) in turn. A cluster that is down does not
+   * hold up the others; its error is raised only if no other cluster had a game to expire.
+   */
   async expireOneTurn(): Promise<boolean> {
     const clusters = this.clusters.list();
+    let failure: unknown;
     for (let offset = 0; offset < clusters.length; offset += 1) {
       const cluster = clusters[(this.nextExpiryCluster + offset) % clusters.length];
-      if (await this.expireOneTurnIn(cluster)) return true;
+      try {
+        if (await this.expireOneTurnIn(cluster)) return true;
+      } catch (error) {
+        failure ??= error;
+      }
     }
     this.nextExpiryCluster = clusters.length === 0 ? 0 : (this.nextExpiryCluster + 1) % clusters.length;
+    if (failure !== undefined) throw failure;
     return false;
   }
 
@@ -442,11 +451,11 @@ export class EtcdStore implements GameStore {
     return cluster;
   }
 
-  /** The data cluster for a new game: a random ACTIVE one, so draining clusters get no new games. */
+  /** The data cluster for a new game: a random reachable ACTIVE one, so draining or down clusters get no new games. */
   private pickCluster(): DataCluster {
-    const active = this.clusters.active();
-    if (active.length === 0) throw new Error("etcd store: no ACTIVE data cluster to place a new game on");
-    return active[Math.floor(Math.random() * active.length)];
+    const candidates = this.clusters.placeable();
+    if (candidates.length === 0) throw new Error("etcd store: no ACTIVE data cluster to place a new game on");
+    return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
   private routeWrites(route: Route): IOperation[] {
