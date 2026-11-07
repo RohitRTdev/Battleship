@@ -17,12 +17,6 @@ variable "etcd_data_cluster_count" {
   }
 }
 
-variable "etcd_colocate" {
-  description = "Run every cluster on the same three machines (each on its own ports) instead of three machines per cluster. Fits accounts with a low vCPU limit, but a machine failure then hits every cluster."
-  type        = bool
-  default     = false
-}
-
 variable "etcd_instance_type" {
   type    = string
   default = "t3.small"

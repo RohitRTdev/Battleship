@@ -11,7 +11,7 @@
 Start the development environment:
 
 ```sh
-./setup.sh up etcd
+./setup.sh up
 ```
 
 This creates `.env` when needed, generates a JWT secret, enables development test routes, builds the containers, and waits for them to become healthy. The application is then available at:
@@ -24,7 +24,7 @@ Deploy the production application to AWS:
 
 ```sh
 aws login
-./setup.sh up prod etcd
+./setup.sh up prod
 ```
 
 Following this, you may access the public url mentioned in output log of the script, to play the game
@@ -32,12 +32,12 @@ Following this, you may access the public url mentioned in output log of the scr
 To stop development build:
 
 ```sh
-./setup.sh down etcd
+./setup.sh down
 ```
 
-If you have deployed application (./setup.sh up prod etcd), then you can terminate the resources by calling:
+If you have deployed application (./setup.sh up prod), then you can terminate the resources by calling:
 ```sh
-./setup.sh down prod etcd
+./setup.sh down prod
 ```
 Note: This will also destroy the etcd clusters and the user pool, which means game data and user login data will be gone.
 
@@ -62,7 +62,7 @@ cli activate b                             # undo a drain
 cli remove b                               # retire a drained cluster once it has no unfinished games or archive jobs
 ```
 
-On AWS (`./setup.sh up prod etcd`), the control-plane cluster and the two data clusters run on EC2: nine nodes, with each cluster spread over three availability zones (set `etcd_data_cluster_count` for more data clusters), reachable through SSM Session Manager. On AWS, run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
+On AWS (`./setup.sh up prod`), three shared EC2 hosts run the control-plane cluster and the data clusters. Each host runs one member of every cluster, in a separate container with its own data directory and ports. The hosts are spread across three availability zones; losing one host affects every cluster, but each retains two members. Set `etcd_data_cluster_count` for more data clusters. Hosts are reachable through SSM Session Manager. Run the cluster CLI inside a backend task with ECS Exec (needs the AWS Session Manager plugin):
 
 ```sh
 task=$(aws ecs list-tasks --cluster battleship-prod --query 'taskArns[0]' --output text)
@@ -70,40 +70,18 @@ aws ecs execute-command --cluster battleship-prod --task "$task" --container bac
   --command "node apps/game-service/dist/cli/clusters.js list"
 ```
 
-**AWS vCPU limit.** An account on AWS's free plan may run at most 8 vCPUs of regular EC2 instances, and every instance type the free plan allows has 2 vCPUs, so at most 4 machines. The nine machines (18 vCPUs) don't fit: AWS refuses most of them and the backends never start. Such an account must deploy the co-located layout instead, which runs every cluster on the same three machines, each on its own ports (control 2379, a 2381, b 2383):
-
-```sh
-TF_VAR_etcd_colocate=true ./setup.sh up prod etcd
-```
-
-The setting is not saved anywhere, so **pass `TF_VAR_etcd_colocate=true` on every deploy**, including redeploys. A plain `./setup.sh up prod etcd` against a co-located deployment would delete the three shared machines (and every game on them) to build nine separate ones, which the vCPU limit then refuses, leaving no control plane. The trade-off of co-locating is that losing one machine takes a member from every cluster at once.
-
-Locally, `compose.yaml` runs the control plane as `etcd-1..3` and the data clusters as `data-a-1..3` and `data-b-1..3`, with their data in `runtime/etcd/`. To see the control plane and which node is its leader (for a data cluster, use e.g. `battleship-data-a-1` and `data-a-1..3`):
+Locally, `compose.yaml` runs each etcd member in its own container, with data in `runtime/etcd/`. To inspect the control cluster:
 
 ```sh
 docker exec battleship-etcd-1 etcdctl \
   --endpoints=http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379 endpoint status -w table
 ```
 
-To try a failover, stop a cluster's leader (e.g. `docker kill battleship-etcd-1`), keep playing or run `python scripts/game_bots.py`, then bring it back with `docker start battleship-etcd-1`. Requests in flight while the leader dies can fail with a 503 for about a second; no committed move is lost.
+To try a failover, stop a member (for example, `docker kill battleship-etcd-1`), then bring it back with `docker start battleship-etcd-1`. Requests in flight during a leader election may fail temporarily.
 
 ## Turn timeout
 
 By default, both players share 60 seconds to submit their fleets; the game is cancelled if either player has not submitted in time. Each active turn lasts 30 seconds, with a 500 ms server-side delivery grace period. A player who runs out of time loses the match. To disable the timer for testing, set `DISABLE_TIMEOUT=true` in `.env` before starting development or deploying production. The setting applies to all backend instances; restart the deployment after changing it. Use fresh game data when changing this setting.
-
-## Tests
-
-```sh
-npm test
-```
-
-Runs the game-service store tests against throwaway etcd containers (Docker required). The single-cluster and sharded layouts run the same suite in `apps/game-service/test/store-contract.ts`.
-
-```sh
-npm run test:failover --workspace=@battleship/game-service
-```
-
-Plays games on a throwaway three-node etcd cluster while repeatedly killing its leader, and checks that no move is lost, applied twice, or reported wrongly. It takes about a minute. `npm run test:failover:sharded --workspace=@battleship/game-service` does the same with a control-plane cluster and two data clusters, killing the leaders of all three in turn.
 
 ## Test bots
 
@@ -112,37 +90,24 @@ To use the test scripts in production (cloud deployed), first run:
 python -m pip install -r scripts/requirements.txt
 ```
 
-After `./setup.sh up prod etcd` completes, provision the Cognito bot accounts once
+After `./setup.sh up prod` completes, provision the Cognito bot accounts once
 using an authenticated AWS profile:
 
 ```sh
 python scripts/auth_users.py --prod provision-bots
 ```
 
-This script creates 120 bot accounts within the cloud deployment.
+This script creates 1000 bot accounts within the cloud deployment.
 
-Then run either one interactive bot or the concurrent game checks:
+Then run either one interactive bot or a simulated game environment:
 
 ```sh
 python scripts/play_bot.py --prod
-python scripts/game_bots.py --prod
+python scripts/simulate_game.py --prod
 ```
 Use `play_bot.py` to let a bot start a game. You may then join the game using the printed game code.
 
-You may check the script doc to see what each one does<br>
-For Example: Run authentication smoke test
-
-```sh
-python scripts/auth_smoke.py
-```
-
-By default, it concurrently registers and logs in 50 uniquely named bots, then prints all registered user IDs, usernames, and creation timestamps.
-
-Run a larger swarm:
-
-```sh
-python scripts/auth_smoke.py --count 120 --workers 40
-```
+You may check the script doc to see what each one does
 
 > [!IMPORTANT]
 > These scripts work with both local and cloud deployments. Add the `--prod`

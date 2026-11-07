@@ -137,22 +137,21 @@ reset_dev() {
 
 usage() {
   echo "Usage:"
-  echo "  ./setup.sh up etcd          Start development at localhost:8000 (etcd store)"
-  echo "  ./setup.sh down etcd        Stop development"
-  echo "  ./setup.sh up prod etcd     Build and deploy to AWS (see README for TF_VAR_etcd_colocate)"
-  echo "  ./setup.sh down prod etcd   Permanently delete the AWS deployment"
+  echo "  ./setup.sh up          Start development at localhost:8000 (etcd store)"
+  echo "  ./setup.sh down        Stop development"
+  echo "  ./setup.sh up prod     Build and deploy to AWS"
+  echo "  ./setup.sh down prod   Permanently delete the AWS deployment"
   echo "  ./setup.sh reset       Delete generated development data"
 }
 
 command=${1:-help}
 environment=${2:-dev}
-store=${3:-}
-case "$command:$environment:$store" in
-  up:etcd:) up_dev ;;
-  down:etcd:) down_dev ;;
-  up:prod:etcd) up_prod ;;
-  down:prod:etcd) down_prod ;;
-  reset:dev:) reset_dev ;;
-  help:dev:) usage ;;
+case "$command:$environment" in
+  up:dev) up_dev ;;
+  down:dev) down_dev ;;
+  up:prod) up_prod ;;
+  down:prod) down_prod ;;
+  reset:dev) reset_dev ;;
+  help:dev) usage ;;
   *) usage >&2; exit 1 ;;
 esac

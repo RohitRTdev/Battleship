@@ -1,52 +1,34 @@
-# The game store: three-node etcd clusters on EC2, each spread over three availability zones:
-# a control-plane cluster plus etcd_data_cluster_count data clusters (a, b, ...), each on its own three machines, or
-# all on three shared ones with etcd_colocate.
-# Every node runs the same pinned etcd image as compose.yaml, with its data on the instance's gp3 root volume.
-# Nodes have fixed private IPs, so membership is static.
-
+# Three shared EC2 hosts, one per availability zone. Each runs one member of every etcd cluster.
+# Clusters use separate ports and data directories on each host.
 locals {
-  etcd_image = "quay.io/coreos/etcd:v3.6.15"
-  etcd_azs   = slice(data.aws_availability_zones.available.names, 0, 3)
-  # Co-located: every cluster shares the same three machines, each cluster on its own pair of ports.
-  etcd_colocate = var.etcd_colocate
-  # Each cluster takes one IP (10 + its position) in each of the three etcd subnets, or, co-located, ports
-  # 2379/2380 + 2 * its position on the shared machines.
+  etcd_image       = "quay.io/coreos/etcd:v3.6.15"
+  etcd_azs         = slice(data.aws_availability_zones.available.names, 0, 3)
   etcd_cluster_ids = concat(["control"], [for index in range(var.etcd_data_cluster_count) : substr("abcdefgh", index, 1)])
   etcd_clusters = [for position, id in local.etcd_cluster_ids : {
     id          = id
-    ip_offset   = local.etcd_colocate ? 10 : 10 + position
-    client_port = local.etcd_colocate ? 2379 + 2 * position : 2379
-    peer_port   = local.etcd_colocate ? 2380 + 2 * position : 2380
+    client_port = 2379 + 2 * position
+    peer_port   = 2380 + 2 * position
   }]
   etcd_nodes = {
     for pair in setproduct(local.etcd_clusters, [1, 2, 3]) : "${pair[0].id}-${pair[1]}" => {
       cluster     = pair[0].id
       index       = pair[1]
-      ip          = cidrhost(cidrsubnet(aws_vpc.main.cidr_block, 8, 19 + pair[1]), pair[0].ip_offset)
+      ip          = cidrhost(cidrsubnet(aws_vpc.main.cidr_block, 8, 19 + pair[1]), 10)
       client_port = pair[0].client_port
       peer_port   = pair[0].peer_port
       name        = "${pair[0].id}-${pair[1]}"
       token       = "${var.name}-etcd-${pair[0].id}"
-      container   = local.etcd_colocate ? "etcd-${pair[0].id}" : "etcd"
-      data_dir    = local.etcd_colocate ? "/var/lib/etcd-${pair[0].id}" : "/var/lib/etcd"
+      container   = "etcd-${pair[0].id}"
+      data_dir    = "/var/lib/etcd-${pair[0].id}"
     }
   }
-  # The machines: one per node, or, co-located, three shared by every cluster.
-  etcd_hosts = local.etcd_colocate ? {
+  etcd_hosts = {
     for index in [1, 2, 3] : "shared-${index}" => {
       index   = index
       ip      = local.etcd_nodes["control-${index}"].ip
       tag     = "${var.name}-etcd-shared-${index}"
       cluster = "shared"
       members = [for key, node in local.etcd_nodes : node if node.index == index]
-    }
-    } : {
-    for key, node in local.etcd_nodes : key => {
-      index   = node.index
-      ip      = node.ip
-      tag     = "${var.name}-etcd-${key}"
-      cluster = node.cluster
-      members = [node]
     }
   }
   etcd_client_ports = distinct([for cluster in local.etcd_clusters : cluster.client_port])
