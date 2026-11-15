@@ -13,7 +13,7 @@ const messages: Record<GameErrorCode, string> = {
   GAME_ALREADY_STARTED: "The game has already started.",
   GAME_CANCELLED: "The game was cancelled.",
   GAME_ALREADY_FINISHED: "The game has already finished.",
-  MATCH_NOT_FOUND: "That archived match was not found.",
+  MATCH_NOT_FOUND: "That match detail is unavailable or has expired.",
   GAME_NOT_IN_PLACEMENT: "The game is not accepting fleet placements.",
   GAME_NOT_ACTIVE: "The game is not active.",
   FLEET_ALREADY_SUBMITTED: "The player's fleet has already been submitted.",

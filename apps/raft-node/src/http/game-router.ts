@@ -207,7 +207,8 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
       const page = await archive.listPlayerMatches(request.user!.id, cursor, rawLimit);
       response.json({
         player: { id: request.user!.id, username: request.user!.username },
-        ...page
+        ...page,
+        statistics: await repository.getPlayerStatistics(request.user!.id)
       });
     } catch (error) {
       if (error instanceof Error && error.message === "INVALID_CURSOR") {

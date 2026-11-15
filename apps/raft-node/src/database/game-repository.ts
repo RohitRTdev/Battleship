@@ -4,7 +4,8 @@ import type {
   ConnectionStatus,
   GameStatus,
   PlayerGameView,
-  PlayerStateResponse
+  PlayerStateResponse,
+  PlayerStatistics
 } from "@battleship/game-contract";
 import type { Pool, PoolClient } from "pg";
 import {
@@ -289,6 +290,22 @@ export class GameRepository {
     await updateMetadata(client, state);
     if (state.status === "FINISHED") {
       await client.query("DELETE FROM active_player_games WHERE game_id = $1", [state.gameId]);
+      if (state.completionReason !== "CANCELLED" && state.playerTwo && state.winnerPlayerId) {
+        // Stable ordering prevents deadlocks when different games finish concurrently.
+        for (const player of [state.playerOne, state.playerTwo].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+          const won = player.id === state.winnerPlayerId;
+          await client.query(
+            `INSERT INTO player_statistics (player_id, matches_played, wins, losses, surrenders)
+             VALUES ($1, 1, $2, $3, $4)
+             ON CONFLICT (player_id) DO UPDATE SET
+               matches_played = player_statistics.matches_played + 1,
+               wins = player_statistics.wins + EXCLUDED.wins,
+               losses = player_statistics.losses + EXCLUDED.losses,
+               surrenders = player_statistics.surrenders + EXCLUDED.surrenders`,
+            [player.id, Number(won), Number(!won), Number(state.completionReason === "SURRENDER" && !won)]
+          );
+        }
+      }
       await enqueueArchive(client, state);
     }
     await notifyUpdate(client, state);
@@ -344,6 +361,15 @@ export class GameRepository {
     } finally {
       client.release();
     }
+  }
+
+  async getPlayerStatistics(playerId: string): Promise<PlayerStatistics> {
+    const result = await this.pool.query<{ matches_played: number; wins: number; losses: number; surrenders: number }>(
+      "SELECT matches_played, wins, losses, surrenders FROM player_statistics WHERE player_id = $1", [playerId]
+    );
+    const row = result.rows[0];
+    return row ? { matchesPlayed: row.matches_played, wins: row.wins, losses: row.losses, surrenders: row.surrenders }
+      : { matchesPlayed: 0, wins: 0, losses: 0, surrenders: 0 };
   }
 
   async getPlayerState(playerId: string): Promise<PlayerStateResponse> {

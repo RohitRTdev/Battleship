@@ -10,7 +10,6 @@ import {
   matchSummary,
   playerArchive,
   playerPathPart,
-  statisticsFromHistoryNames,
   type ArchivePage,
   type MatchArchive
 } from "./match-archive.js";
@@ -55,7 +54,7 @@ export class LocalMatchArchive implements MatchArchive {
       names = (await readdir(directory)).filter((name) => name.endsWith(".json")).sort();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { statistics: statisticsFromHistoryNames([]), matches: [], nextCursor: null };
+        return { matches: [], nextCursor: null };
       }
       throw error;
     }
@@ -66,7 +65,6 @@ export class LocalMatchArchive implements MatchArchive {
     const pageNames = names.slice(start, start + limit);
     const matches = await Promise.all(pageNames.map((name) => readJson<PlayerMatchSummary>(path.join(directory, name))));
     return {
-      statistics: statisticsFromHistoryNames(names),
       matches,
       nextCursor: start + pageNames.length < names.length && pageNames.length > 0
         ? encodeCursor(pageNames.at(-1)!)

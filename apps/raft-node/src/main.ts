@@ -8,6 +8,7 @@ import { GameUpdateBus } from "./database/update-bus.js";
 import { createGameRouter } from "./http/game-router.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
+import { RetentionWorker } from "./archive/retention-worker.js";
 
 const serviceName = process.env.SERVICE_NAME ?? "raft-backend";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
@@ -53,6 +54,7 @@ let timeoutTimer: NodeJS.Timeout | null = null;
 const updates = new GameUpdateBus(database);
 const archive = createMatchArchive();
 const archiveWorker = new ArchiveWorker(database, archive, updates);
+const retentionWorker = new RetentionWorker(database, archive);
 
 async function initializeDatabase(): Promise<void> {
   while (true) {
@@ -70,6 +72,7 @@ async function initializeDatabase(): Promise<void> {
       }
       await updates.start();
       archiveWorker.start();
+      retentionWorker.start();
       if (timeoutEnabled && !timeoutTimer) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
       databaseReady = true;
       return;
@@ -165,6 +168,7 @@ function shutdown(): void {
   httpServer.close(() => {
     timeoutWorkerClosed = true;
     if (timeoutTimer) clearInterval(timeoutTimer);
+    retentionWorker.close();
     archiveWorker.close();
     updates.close();
     void database.end().finally(() => process.exit(0));
