@@ -6,6 +6,7 @@ import { runMigrations } from "./database/migrations.js";
 import { GameRepository } from "./database/game-repository.js";
 import { GameUpdateBus } from "./database/update-bus.js";
 import { createGameRouter } from "./http/game-router.js";
+import { backendErrorHandler } from "./http/error-handler.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
 
@@ -125,21 +126,7 @@ if (production) {
 app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(repository, updates, archive));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
-app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
-  console.error("Unhandled backend request error", error);
-  const candidate = error as { code?: unknown; status?: unknown; type?: unknown };
-  if (candidate.status === 400 || candidate.type === "entity.parse.failed") {
-    response.status(400).json({ error: { code: "INVALID_REQUEST", message: "The request body is invalid." } });
-    return;
-  }
-  const databaseFailure = typeof candidate.code === "string" &&
-    (/^\d{5}$/.test(candidate.code) || candidate.code.startsWith("ECONN"));
-  response.status(databaseFailure ? 503 : 500).json({
-    error: databaseFailure
-      ? { code: "DATABASE_UNAVAILABLE", message: "The game database is unavailable." }
-      : { code: "INTERNAL_ERROR", message: "An internal error occurred." }
-  });
-});
+app.use(backendErrorHandler);
 
 const httpServer = app.listen(httpPort, "0.0.0.0");
 // Behind the AWS load balancer (idle timeout 60 s), Node must keep idle connections open longer than the balancer

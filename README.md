@@ -71,7 +71,7 @@ Then run either one interactive bot or simulate multiple bots playing in backgro
 
 ```sh
 python scripts/play_bot.py --prod
-python scripts/simutate_game.py --prod
+python scripts/simulate_game.py --prod
 ```
 Use play_bot.py to let a bot start a game. You may then join the game using the printed game code.
 

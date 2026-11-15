@@ -1,3 +1,4 @@
+import { authErrorHandler } from "./error-handler.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { authorizeUser, createLocalTokenVerifier, createToken } from "@battleship/auth-token";
@@ -190,16 +191,7 @@ app.delete("/api/auth/_test/users/:userId", (request, response) => {
 app.use(authorizeUser(tokenVerifier));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
-app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
-  console.error("Unhandled auth request error", error);
-  const candidate = error as { status?: unknown; type?: unknown };
-  if (candidate.status === 400 || candidate.type === "entity.parse.failed") {
-    response.status(400).json({ error: "The request body is invalid" });
-    return;
-  }
-
-  response.status(500).json({ error: "Internal server error" });
-});
+app.use(authErrorHandler);
 
 const httpServer = app.listen(httpPort, "0.0.0.0");
 await new Promise<void>((resolve, reject) => {
