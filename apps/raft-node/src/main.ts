@@ -8,6 +8,7 @@ import { GameUpdateBus } from "./database/update-bus.js";
 import { createGameRouter } from "./http/game-router.js";
 import { createMatchArchive } from "./archive/index.js";
 import { ArchiveWorker } from "./archive/archive-worker.js";
+import { cleanupCommandRateLimits, commandRateLimiter } from "./http/rate-limit.js";
 
 const serviceName = process.env.SERVICE_NAME ?? "raft-backend";
 const nodeId = process.env.NODE_ID ?? "backend-node-unknown";
@@ -39,6 +40,8 @@ database.on("error", (error) => {
 const disableTimeout = process.env.DISABLE_TIMEOUT ?? "false";
 if (disableTimeout !== "true" && disableTimeout !== "false") throw new Error("DISABLE_TIMEOUT must be true or false");
 const timeoutEnabled = disableTimeout === "false";
+const rateLimitEnabled = process.env.RATE_LIMIT_ENABLED ?? "true";
+if (rateLimitEnabled !== "true" && rateLimitEnabled !== "false") throw new Error("RATE_LIMIT_ENABLED must be true or false");
 const repository = new GameRepository(database, timeoutEnabled);
 let timeoutWorkerRunning = false;
 let timeoutWorkerClosed = false;
@@ -53,6 +56,7 @@ let timeoutTimer: NodeJS.Timeout | null = null;
 const updates = new GameUpdateBus(database);
 const archive = createMatchArchive();
 const archiveWorker = new ArchiveWorker(database, archive, updates);
+let rateLimitCleanupTimer: NodeJS.Timeout | null = null;
 
 async function initializeDatabase(): Promise<void> {
   while (true) {
@@ -70,6 +74,11 @@ async function initializeDatabase(): Promise<void> {
       }
       await updates.start();
       archiveWorker.start();
+      if (rateLimitEnabled === "true" && !rateLimitCleanupTimer) {
+        rateLimitCleanupTimer = setInterval(() => {
+          void cleanupCommandRateLimits(database).catch((error: unknown) => console.error("Rate limit cleanup failed", error));
+        }, 15 * 60_000);
+      }
       if (timeoutEnabled && !timeoutTimer) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
       databaseReady = true;
       return;
@@ -86,7 +95,6 @@ await initializeDatabase();
 
 const app = express();
 app.disable("etag");
-app.use(express.json({ limit: "32kb" }));
 app.use((_request, response, next) => {
   response.setHeader("X-Battleship-Node", nodeId);
   next();
@@ -122,7 +130,9 @@ if (production) {
   app.use(express.static(frontendDirectory));
 }
 
-app.use("/api/backend", authorizeUser(tokenVerifier), createGameRouter(repository, updates, archive));
+app.use("/api/backend", authorizeUser(tokenVerifier),
+  ...(rateLimitEnabled === "true" ? [commandRateLimiter(database)] : []),
+  express.json({ limit: "32kb" }), createGameRouter(repository, updates, archive));
 
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
@@ -165,6 +175,7 @@ function shutdown(): void {
   httpServer.close(() => {
     timeoutWorkerClosed = true;
     if (timeoutTimer) clearInterval(timeoutTimer);
+    if (rateLimitCleanupTimer) clearInterval(rateLimitCleanupTimer);
     archiveWorker.close();
     updates.close();
     void database.end().finally(() => process.exit(0));

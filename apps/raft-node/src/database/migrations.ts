@@ -55,6 +55,12 @@ const migrations = [
         last_seen_at TIMESTAMPTZ NOT NULL,
         PRIMARY KEY (game_id, player_id)
       );
+
+      CREATE TABLE command_rate_limits (
+        player_id TEXT PRIMARY KEY,
+        accepted_at TIMESTAMPTZ[] NOT NULL DEFAULT '{}',
+        CHECK (cardinality(accepted_at) <= 20)
+      );
     `
   },
   {
