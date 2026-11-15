@@ -7,6 +7,7 @@ import random
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from .auth_client import application_ssl_context
 
 BOARD_SIZE = 10
 SHIP_LENGTHS = (5, 4, 3, 3, 2)
@@ -45,7 +46,7 @@ class GameClient:
             },
         )
         try:
-            with urlopen(request, timeout=12) as response:
+            with urlopen(request, timeout=12, context=application_ssl_context()) as response:
                 status = response.status
                 payload = json.loads(response.read() or b"{}")
         except HTTPError as error:

@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 
-from common.auth_client import AuthClientError, configure_production, login
+from common.auth_client import AuthClientError, configure_production, login, application_ssl_context
 from common.bot_names import DEFAULT_NAME_FILE, bot_password
 from common.game_bot import aggressive_target, bot_player, random_fleet
 
@@ -213,7 +213,7 @@ async def simulate(args: argparse.Namespace, names: list[str]) -> int:
         loop.add_signal_handler(signal.SIGTERM, stop.set)
     except (NotImplementedError, RuntimeError):
         pass
-    connector = aiohttp.TCPConnector(limit=max(100, len(names) * 2), limit_per_host=max(100, len(names) * 2))
+    connector = aiohttp.TCPConnector(limit=max(100, len(names) * 2), limit_per_host=max(100, len(names) * 2), ssl=application_ssl_context() or True)
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         auth_limit = asyncio.Semaphore(16)

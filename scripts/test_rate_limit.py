@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 from common.auth_client import (
     AuthClientError, configure_production, delete_production_user, delete_user,
-    list_users, login, provision_user, register,
+    list_users, login, provision_user, register, application_ssl_context,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,7 +28,7 @@ def request(base_url: str, token: str, method: str, path: str) -> tuple[int, dic
         "Authorization": f"Bearer {token}", "Content-Type": "application/json",
     })
     try:
-        response = urlopen(req, timeout=15)
+        response = urlopen(req, timeout=15, context=application_ssl_context())
     except HTTPError as error:
         response = error
     with response:
@@ -77,6 +77,7 @@ def main() -> int:
             tokens.append(login(base_url, username, password).access_token)
 
         print(f"Testing {'production' if args.prod else 'local'} deployment at {base_url}", flush=True)
+        application_ssl_context()  # Initialize trust before starting concurrent requests.
         start = time.monotonic()
         with ThreadPoolExecutor(max_workers=100) as executor:
             results = list(executor.map(lambda _: request(base_url, tokens[0], "POST", COMMAND_PATH), range(100)))

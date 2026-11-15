@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from .tls import production_ssl_context
 
 
 class AuthClientError(RuntimeError):
@@ -61,6 +62,10 @@ def configure_production(path: Path = Path(".deployment/prod.json")) -> str:
 
 def is_production() -> bool:
     return _production is not None
+
+
+def application_ssl_context():
+    return production_ssl_context() if is_production() else None
 
 
 def _cognito_client(admin: bool = False):
