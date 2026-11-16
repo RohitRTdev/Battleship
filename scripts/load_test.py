@@ -11,6 +11,7 @@ import random
 import secrets
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -187,10 +188,10 @@ async def setup_matches(session, args, cognito, pool, client_id, run_id, created
             created = await request('POST', '/api/backend/games', a, {}, 201)
             code = created['game']['gameCode']
             created_matches.append((a, code))
-            await request('POST', f'/api/backend/games/{code}/join', b, {})
+            joined = await request('POST', f'/api/backend/games/{code}/join', b, {'commandId': str(uuid.uuid4()), 'expectedVersion': 1})
             rng = random.Random(args.seed + i)
-            await request('PUT', f'/api/backend/games/{code}/fleet', a, {'ships': random_fleet(rng)})
-            result = await request('PUT', f'/api/backend/games/{code}/fleet', b, {'ships': random_fleet(rng)})
+            placed = await request('PUT', f'/api/backend/games/{code}/fleet', a, {'ships': random_fleet(rng), 'commandId': str(uuid.uuid4()), 'expectedVersion': joined['game']['version']})
+            result = await request('PUT', f'/api/backend/games/{code}/fleet', b, {'ships': random_fleet(rng), 'commandId': str(uuid.uuid4()), 'expectedVersion': placed['game']['version']})
             game = result['game']
             if game.get('status') != 'ACTIVE' or game.get('turnDeadlineAt'):
                 raise RuntimeError(f'Match {code} is not active with timers disabled; deploy with DISABLE_TIMEOUT=true')
@@ -221,13 +222,14 @@ async def finish_matches(session, args, matches, cognito, client_id, seed):
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
                         raise RuntimeError(f'game lookup returned HTTP {response.status}')
-                    status = (await response.json())['game']['status']
+                    game = (await response.json())['game']
+                    status = game['status']
                 if status == 'FINISHED':
                     return {'game_code': code, 'result': 'already_finished'}
                 if status not in ('ACTIVE', 'WAITING', 'PLACEMENT'):
                     raise RuntimeError(f'unexpected game status {status!r}')
                 action = 'surrender' if status == 'ACTIVE' else 'cancel'
-                async with session.post(f'{url}/{action}', headers=headers, json={}) as response:
+                async with session.post(f'{url}/{action}', headers=headers, json={'commandId': str(uuid.uuid4()), 'expectedVersion': game['version']}) as response:
                     if response.status != 200:
                         raise RuntimeError(f'{action} returned HTTP {response.status}')
                     await response.read()
@@ -277,6 +279,7 @@ async def run_level(session, args, players, rate, duration, repetition, index, w
     start = datetime.fromtimestamp(start_wall, timezone.utc).isoformat(timespec='milliseconds')
     print(f"{start} START {'warmup' if warmup else 'level '+str(index)}: {rate:g} req/s", flush=True)
     rows, tasks = [], set()
+    versions = {code: 4 for _, code in players}
     rng = random.Random(args.seed + repetition*100000 + index)
 
     async def send(number, scheduled):
@@ -292,9 +295,15 @@ async def run_level(session, args, players, rate, duration, repetition, index, w
             path = f'/api/backend/games/{code}' + ('/fire' if kind == 'fire' else '')
             async with session.request('POST' if kind == 'fire' else 'GET', args.url.rstrip('/')+path,
                     headers={'Authorization': 'Bearer '+user['token'], 'Cache-Control': 'no-store'},
-                    json={'coordinate': {'row': 0, 'column': 0}} if kind == 'fire' else None,
+                    json={'coordinate': {'row': 0, 'column': 0}, 'commandId': str(uuid.uuid4()), 'expectedVersion': versions[code]} if kind == 'fire' else None,
                     timeout=aiohttp.ClientTimeout(total=args.timeout)) as response:
-                await response.read()
+                content = await response.read()
+                if response.status == 200:
+                    try:
+                        version = json.loads(content)['game']['version']
+                        versions[code] = max(versions[code], version)
+                    except (ValueError, KeyError, TypeError):
+                        pass
                 row['status'] = response.status
         except (asyncio.TimeoutError, TimeoutError):
             row['failure'] = 'timeout'

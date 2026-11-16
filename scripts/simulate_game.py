@@ -9,6 +9,7 @@ import random
 import signal
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -104,7 +105,7 @@ class Player:
             self.game_code = None
             return
         if status == 'PLACEMENT' and not bot_player(game).get('fleetSubmitted'):
-            await self.request('PUT', f'/games/{code}/fleet', {'ships': self.fleet})
+            await self.request('PUT', f'/games/{code}/fleet', {'ships': self.fleet, 'commandId': str(uuid.uuid4()), 'expectedVersion': game['version']})
             return
         if status == 'ACTIVE' and game.get('isYourTurn'):
             if self.aggressive:
@@ -117,7 +118,7 @@ class Player:
                 row, column = self.rng.choice(available)
                 target = {'row': row, 'column': column}
             if not stop.is_set():
-                await self.request('POST', f'/games/{code}/fire', {'coordinate': target})
+                await self.request('POST', f'/games/{code}/fire', {'coordinate': target, 'commandId': str(uuid.uuid4()), 'expectedVersion': game['version']})
             return
         if status not in {'WAITING', 'PLACEMENT', 'ACTIVE'}:
             raise ValueError(f'Unexpected game status: {status}')

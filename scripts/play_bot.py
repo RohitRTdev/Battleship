@@ -7,6 +7,7 @@ import os
 import random
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -48,9 +49,9 @@ def finish_abandoned_game(client: GameClient, game: dict[str, Any]) -> None:
     status = game.get("status")
     try:
         if status in {"WAITING", "PLACEMENT"}:
-            client.request("POST", f"/api/backend/games/{game['gameCode']}/cancel", {})
+            client.request("POST", f"/api/backend/games/{game['gameCode']}/cancel", {'commandId': str(uuid.uuid4()), 'expectedVersion': game['version']})
         elif status == "ACTIVE":
-            client.request("POST", f"/api/backend/games/{game['gameCode']}/surrender", {})
+            client.request("POST", f"/api/backend/games/{game['gameCode']}/surrender", {'commandId': str(uuid.uuid4()), 'expectedVersion': game['version']})
     except ApiError:
         pass
 
@@ -95,10 +96,10 @@ def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) ->
                         response = client.request(
                             "PUT",
                             f"/api/backend/games/{code}/fleet",
-                            {"ships": fleet},
+                            {"ships": fleet, "commandId": str(uuid.uuid4()), "expectedVersion": game["version"]},
                         )
                     except ApiError as error:
-                        if error.code in {"GAME_CANCELLED", "GAME_ALREADY_FINISHED"}:
+                        if error.code in {"GAME_CANCELLED", "GAME_ALREADY_FINISHED", "STALE_VERSION"}:
                             game = client.request("GET", f"/api/backend/games/{code}")["game"]
                             continue
                         raise
@@ -131,10 +132,10 @@ def run_bot(client: GameClient, rng: random.Random, aggressive: bool = False) ->
                 response = client.request(
                     "POST",
                     f"/api/backend/games/{code}/fire",
-                    {"coordinate": target},
+                    {"coordinate": target, "commandId": str(uuid.uuid4()), "expectedVersion": game["version"]},
                 )
             except ApiError as error:
-                if error.code in {"NOT_YOUR_TURN", "COORDINATE_ALREADY_ATTACKED", "TURN_TIMED_OUT", "GAME_ALREADY_FINISHED", "GAME_CANCELLED"}:
+                if error.code in {"STALE_VERSION", "NOT_YOUR_TURN", "COORDINATE_ALREADY_ATTACKED", "TURN_TIMED_OUT", "GAME_ALREADY_FINISHED", "GAME_CANCELLED"}:
                     game = client.request("GET", f"/api/backend/games/{code}")["game"]
                     continue
                 raise

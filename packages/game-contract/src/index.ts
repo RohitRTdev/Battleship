@@ -12,6 +12,8 @@ export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
 
 export const GAME_ERROR_CODES = [
   "INVALID_REQUEST",
+  "STALE_VERSION",
+  "COMMAND_ID_CONFLICT",
   "INVALID_GAME_CODE",
   "GAME_NOT_FOUND",
   "PLAYER_ALREADY_PLAYING",
@@ -40,7 +42,12 @@ export const GAME_ERROR_CODES = [
 export type GameErrorCode = (typeof GAME_ERROR_CODES)[number];
 
 export type Coordinate = { row: number; column: number };
+export type CommandMetadata = { commandId: string; expectedVersion: number };
 export type ShipPlacement = { start: Coordinate; end: Coordinate };
+export type JoinGameRequest = CommandMetadata;
+export type PlaceFleetRequest = CommandMetadata & { ships: ShipPlacement[] };
+export type FireRequest = CommandMetadata & { coordinate: Coordinate };
+export type EndGameRequest = CommandMetadata;
 
 export type ApiError = {
   error: { code: GameErrorCode; message: string };

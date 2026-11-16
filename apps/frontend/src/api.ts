@@ -1,4 +1,4 @@
-import type { ArchivedMatchResponse, FireResponse, GameResponse, MatchmakingUpdateResponse, PlayerProfileResponse, PlayerStateResponse, ShipPlacement, UpdateResponse } from "@battleship/game-contract";
+import type { ArchivedMatchResponse, CommandMetadata, FireResponse, GameResponse, MatchmakingUpdateResponse, PlayerProfileResponse, PlayerStateResponse, UpdateResponse } from "@battleship/game-contract";
 import type { AuthProvider } from "./auth";
 
 export class ApiFailure extends Error {
@@ -80,11 +80,8 @@ export function createApi(auth: AuthProvider) {
     matchmakingUpdates: (signal: AbortSignal) => request<MatchmakingUpdateResponse>("/api/backend/matchmaking/updates", { signal }),
     getGame: (gameCode: string, signal?: AbortSignal) => request<GameResponse>(`/api/backend/games/${gameCode}`, { signal }),
     createGame: () => request<GameResponse>("/api/backend/games", { method: "POST", body: {} }),
-    joinGame: (gameCode: string) => request<GameResponse>(`/api/backend/games/${gameCode}/join`, { method: "POST", body: {} }),
-    placeFleet: (gameCode: string, ships: ShipPlacement[]) => request<GameResponse>(`/api/backend/games/${gameCode}/fleet`, { method: "PUT", body: { ships } }),
-    fire: (gameCode: string, row: number, column: number) => request<FireResponse>(`/api/backend/games/${gameCode}/fire`, { method: "POST", body: { coordinate: { row, column } } }),
-    cancel: (gameCode: string) => request<GameResponse>(`/api/backend/games/${gameCode}/cancel`, { method: "POST", body: {} }),
-    surrender: (gameCode: string) => request<GameResponse>(`/api/backend/games/${gameCode}/surrender`, { method: "POST", body: {} }),
+    matchCommand: (gameCode: string, action: "join" | "fleet" | "fire" | "cancel" | "surrender", body: CommandMetadata & Record<string, unknown>) =>
+      request<GameResponse | FireResponse>(`/api/backend/games/${gameCode}/${action}`, { method: action === "fleet" ? "PUT" : "POST", body }),
     updates: (gameCode: string, version: number, signal: AbortSignal) => request<UpdateResponse>(`/api/backend/games/${gameCode}/updates?afterVersion=${version}`, { signal })
   };
 }

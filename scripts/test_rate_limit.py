@@ -7,6 +7,7 @@ import os
 import secrets
 import sys
 import time
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -23,7 +24,7 @@ COMMAND_PATH = f"/api/backend/games/{secrets.token_hex(4).upper()}/fire"
 
 
 def request(base_url: str, token: str, method: str, path: str) -> tuple[int, dict, dict]:
-    data = b'{"coordinate":{"row":0,"column":0}}' if method == "POST" else None
+    data = json.dumps({"coordinate": {"row": 0, "column": 0}, "commandId": str(uuid.uuid4()), "expectedVersion": 1}).encode() if method == "POST" else None
     req = Request(base_url.rstrip("/") + path, data=data, method=method, headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json",
     })

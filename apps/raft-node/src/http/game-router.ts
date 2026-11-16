@@ -1,4 +1,4 @@
-import type { Coordinate, GameErrorCode, PlayerStateResponse, ShipPlacement } from "@battleship/game-contract";
+import type { CommandMetadata, Coordinate, GameErrorCode, PlayerStateResponse, ShipPlacement } from "@battleship/game-contract";
 import { Router, type Request, type Response } from "express";
 import { domainError, type DomainError, type GameState, type Player, type Result } from "../game/index.js";
 import { GameRepository } from "../database/game-repository.js";
@@ -31,6 +31,13 @@ function gameCode(request: Request, response: Response): string | null {
     return null;
   }
   return raw;
+}
+
+function commandMetadata(value: unknown): CommandMetadata | null {
+  if (typeof value !== "object" || value === null) return null;
+  const body = value as Record<string, unknown>;
+  if (typeof body.commandId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.commandId) || !Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 1) return null;
+  return { commandId: body.commandId, expectedVersion: body.expectedVersion as number };
 }
 
 function coordinate(value: unknown): Coordinate | null {
@@ -149,47 +156,47 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
 
   router.post("/games/:gameCode/join", async (request, response) => {
     const code = gameCode(request, response); if (!code) return;
+    const metadata = commandMetadata(request.body); if (!metadata) return sendError(response, domainError("INVALID_REQUEST"));
     const player = actor(request);
-    const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: player, occurredAt }));
+    const result = await repository.command(code, player, metadata, { type: "JOIN_GAME" }, (_state, occurredAt) => ({ type: "JOIN_GAME", actor: player, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
-    await sendGame(response, repository, result.value.state, player.id);
+    response.json(result.value);
   });
 
   router.put("/games/:gameCode/fleet", async (request, response) => {
     const code = gameCode(request, response); if (!code) return;
     const ships = fleet(request.body);
     if (!ships) return sendError(response, domainError("INVALID_REQUEST"));
+    const metadata = commandMetadata(request.body); if (!metadata) return sendError(response, domainError("INVALID_REQUEST"));
     const player = actor(request);
-    const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships, occurredAt }));
+    const result = await repository.command(code, player, metadata, { type: "PLACE_FLEET", ships }, (_state, occurredAt) => ({ type: "PLACE_FLEET", actor: player, ships, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
-    await sendGame(response, repository, result.value.state, player.id);
+    response.json(result.value);
   });
 
   router.post("/games/:gameCode/fire", async (request, response) => {
     const code = gameCode(request, response); if (!code) return;
     const shot = coordinate(request.body?.coordinate);
     if (!shot) return sendError(response, domainError("INVALID_REQUEST"));
+    const metadata = commandMetadata(request.body); if (!metadata) return sendError(response, domainError("INVALID_REQUEST"));
     const player = actor(request);
-    const result = await repository.command(code, player, (_state, occurredAt) => ({ type: "FIRE", actor: player, coordinate: shot, occurredAt }));
+    const result = await repository.command(code, player, metadata, { type: "FIRE", coordinate: shot }, (_state, occurredAt) => ({ type: "FIRE", actor: player, coordinate: shot, occurredAt }));
     if (!result.ok) return sendError(response, result.error);
-    const view = await repository.view(result.value.state, player.id);
-    if (!view.ok) return sendError(response, view.error);
-    const outcome = repository.attackOutcome(result.value.outcome);
-    if (!outcome) return sendError(response, domainError("INTERNAL_ERROR"));
-    response.json({ game: view.value, outcome });
+    response.json(result.value);
   });
 
   for (const action of ["cancel", "surrender"] as const) {
     router.post(`/games/:gameCode/${action}`, async (request, response) => {
       const code = gameCode(request, response); if (!code) return;
+      const metadata = commandMetadata(request.body); if (!metadata) return sendError(response, domainError("INVALID_REQUEST"));
       const player = actor(request);
-      const result = await repository.command(code, player, (_state, occurredAt) => ({
+      const result = await repository.command(code, player, metadata, { type: action === "cancel" ? "CANCEL_GAME" : "SURRENDER" }, (_state, occurredAt) => ({
         type: action === "cancel" ? "CANCEL_GAME" : "SURRENDER",
         actor: player,
         occurredAt
       }));
       if (!result.ok) return sendError(response, result.error);
-      await sendGame(response, repository, result.value.state, player.id);
+      response.json(result.value);
     });
   }
 

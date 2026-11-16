@@ -102,6 +102,18 @@ const migrations = [
       CREATE INDEX games_finished_retention_idx ON games (ended_at)
         WHERE status = 'FINISHED' AND ended_at IS NOT NULL;
     `
+  }  ,{
+    version: 5,
+    sql: `
+      CREATE TABLE game_command_results (
+        game_id UUID NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        actor_player_id TEXT NOT NULL,
+        command_id UUID NOT NULL,
+        request JSONB NOT NULL,
+        response JSONB NOT NULL,
+        PRIMARY KEY (game_id, actor_player_id, command_id)
+      );
+    `
   }
 ] as const;
 

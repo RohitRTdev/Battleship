@@ -1,6 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type {
   AttackView,
+  CommandMetadata,
+  FireResponse,
+  GameResponse,
   ConnectionStatus,
   GameStatus,
   PlayerGameView,
@@ -218,22 +221,43 @@ export class GameRepository {
   async command(
     gameCode: string,
     actor: Player,
+    metadata: CommandMetadata,
+    request: object,
     buildCommand: (state: GameState, occurredAt: string) => GameCommand
-  ): Promise<Result<CommandResult>> {
+  ): Promise<Result<GameResponse | FireResponse>> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       await lockPlayer(client, actor.id);
-      if (await isSearching(client, actor.id)) {
-        await client.query("ROLLBACK");
-        return failed(domainError("PLAYER_ALREADY_SEARCHING"));
-      }
       const game = await client.query<GameRow>("SELECT id FROM games WHERE code = $1 FOR UPDATE", [gameCode]);
       if (!game.rows[0]) {
         await client.query("ROLLBACK");
         return failed(domainError("GAME_NOT_FOUND"));
       }
+      const identity = { expectedVersion: metadata.expectedVersion, ...request };
+      const prior = await client.query<{ matches: boolean; response: GameResponse | FireResponse }>(
+        `SELECT request = $4::jsonb AS matches, response FROM game_command_results
+         WHERE game_id = $1 AND actor_player_id = $2 AND command_id = $3`,
+        [game.rows[0].id, actor.id, metadata.commandId, JSON.stringify(identity)]
+      );
+      if (prior.rows[0]) {
+        await client.query("ROLLBACK");
+        return prior.rows[0].matches ? { ok: true, value: prior.rows[0].response } : failed(domainError("COMMAND_ID_CONFLICT"));
+      }
+      if (await isSearching(client, actor.id)) {
+        await client.query("ROLLBACK");
+        return failed(domainError("PLAYER_ALREADY_SEARCHING"));
+      }
       const state = await loadState(client, game.rows[0].id);
+      // Only participants may learn the current version; joining is validated by the state machine.
+      if (request && (request as { type?: string }).type !== "JOIN_GAME" && state.playerOne.id !== actor.id && state.playerTwo?.id !== actor.id) {
+        await client.query("ROLLBACK");
+        return failed(domainError("PLAYER_NOT_IN_GAME"));
+      }
+      if (state.version !== metadata.expectedVersion) {
+        await client.query("ROLLBACK");
+        return failed(domainError("STALE_VERSION"));
+      }
       const now = await databaseTime(client);
       const command = buildCommand(state, now);
       if ((command.type === "FIRE" || command.type === "SURRENDER") && state.status === "ACTIVE" && state.turnDeadlineAt && (state.playerOne.id === actor.id || state.playerTwo?.id === actor.id) && Date.parse(now) >= Date.parse(state.turnDeadlineAt) + 500) {
@@ -275,8 +299,19 @@ export class GameRepository {
         }
       }
       await this.persistTransition(client, next, eventCommand(applied.value.event));
+      const presence = await this.presence(next.gameId, next, client);
+      const view = projectGame(next, actor.id, presence);
+      if (!view) throw new Error("Cannot project command response for actor");
+      const outcome = command.type === "FIRE" ? this.attackOutcome(applied.value.outcome) : null;
+      if (command.type === "FIRE" && !outcome) throw new Error("Missing fire outcome");
+      const response = outcome ? { game: view, outcome } : { game: view };
+      await client.query(
+        `INSERT INTO game_command_results (game_id, actor_player_id, command_id, request, response)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
+        [next.gameId, actor.id, metadata.commandId, JSON.stringify(identity), JSON.stringify(response)]
+      );
       await client.query("COMMIT");
-      return { ok: true, value: { state: next, outcome: applied.value.outcome } };
+      return { ok: true, value: response };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -520,8 +555,8 @@ export class GameRepository {
     );
   }
 
-  async presence(gameId: string, state: GameState): Promise<Record<string, ConnectionStatus>> {
-    const result = await this.pool.query<{ player_id: string; connection_status: ConnectionStatus }>(
+  async presence(gameId: string, state: GameState, client: Pool | PoolClient = this.pool): Promise<Record<string, ConnectionStatus>> {
+    const result = await client.query<{ player_id: string; connection_status: ConnectionStatus }>(
       `SELECT player_id,
          CASE WHEN clock_timestamp() - last_seen_at <= interval '10 seconds'
               THEN 'CONNECTED' ELSE 'LAGGING' END AS connection_status

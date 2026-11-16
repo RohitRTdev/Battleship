@@ -2,6 +2,8 @@ import type { GameErrorCode } from "@battleship/game-contract";
 import type { DomainError, Result } from "./types.js";
 
 const messages: Record<GameErrorCode, string> = {
+  STALE_VERSION: "The game has changed. Refresh and try again.",
+  COMMAND_ID_CONFLICT: "This command ID was already used for a different action.",
   INVALID_REQUEST: "The request body is invalid.",
   INVALID_GAME_CODE: "The game code is invalid.",
   GAME_NOT_FOUND: "The game was not found.",

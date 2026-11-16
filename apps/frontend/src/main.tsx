@@ -442,6 +442,9 @@ function App() {
   const pollVersion = useRef(0);
   const pollGameCode = useRef<string | null>(null);
   const matchmakingController = useRef<AbortController | null>(null);
+  const recoveryRunning = useRef(false);
+  const sessionRef = useRef<Session | null>(session);
+  sessionRef.current = session;
   const checkingPlayerState = Boolean(session && playerStateReadyFor !== session.username);
   const applyGame = useCallback((next: PlayerGameView) => {
     setSearchStartedAt(null);
@@ -458,6 +461,64 @@ function App() {
   const logout = useCallback((notice = "") => { matchmakingController.current?.abort(); void auth.logout(); setSession(null); setActiveGameCode(null); setSearchStartedAt(null); setGame(null); setGameLoadError(""); pollGameCode.current = null; pollVersion.current = 0; setBusy(""); setError(""); setAuthNotice(notice); setConnectionBlocked(false); setConfirmingSurrender(false); navigate("/login", { replace: true }); }, [navigate]);
   const handleFailure = useCallback((caught: unknown, fallback: string) => { if (caught instanceof SessionExpiredError || (caught instanceof ApiFailure && caught.status === 401)) { logout("Your session expired. Sign in again to continue."); return; } setError(caught instanceof Error ? caught.message : fallback); }, [logout]);
 
+  type PendingCommand = { username: string; gameCode: string; action: "join" | "fleet" | "fire" | "cancel" | "surrender"; body: { commandId: string; expectedVersion: number } & Record<string, unknown>; response?: { game: PlayerGameView; outcome?: AttackView } };
+  const pendingKey = (username: string) => `battleship.pending-command.${username}`;
+  const recoverCommand = useCallback(async (pending: PendingCommand): Promise<PlayerGameView | null> => {
+    if (recoveryRunning.current) return null;
+    recoveryRunning.current = true;
+    setBusy(pending.action); setError("");
+    let failures = 0;
+    try {
+      while (sessionRef.current?.username === pending.username) {
+        try {
+          if (!pending.response) {
+            pending.response = await api.matchCommand(pending.gameCode, pending.action, pending.body);
+            localStorage.setItem(pendingKey(pending.username), JSON.stringify(pending));
+          }
+          if (sessionRef.current?.username !== pending.username) return null;
+          // Show the recovered result even if refreshing the current state fails.
+          applyGame(pending.response.game);
+          const latest = await api.getGame(pending.gameCode);
+          if (sessionRef.current?.username !== pending.username) return null;
+          applyGame(latest.game);
+          localStorage.removeItem(pendingKey(pending.username));
+          setNetwork("connected"); setConnectionBlocked(false);
+          if (pending.action === "join") navigate(gamePath(pending.gameCode));
+          return latest.game;
+        } catch (caught) {
+          if (caught instanceof SessionExpiredError || (caught instanceof ApiFailure && caught.status === 401)) { handleFailure(caught, "Session expired."); return null; }
+          if (!pending.response && caught instanceof ApiFailure && caught.status >= 400 && caught.status < 500 && caught.status !== 429) {
+            localStorage.removeItem(pendingKey(pending.username));
+            if (caught.code === "STALE_VERSION") {
+              try { applyGame((await api.getGame(pending.gameCode)).game); } catch { /* Next poll will refresh. */ }
+            }
+            handleFailure(caught, "That action could not be completed.");
+            return null;
+          }
+          failures += 1;
+          setNetwork(navigator.onLine ? "reconnecting" : "offline"); setConnectionBlocked(true);
+          await delay(Math.min(1000 * 2 ** Math.min(failures - 1, 2), 4000));
+        }
+      }
+      return null;
+    } finally { recoveryRunning.current = false; setBusy(""); }
+  }, [applyGame, handleFailure, navigate]);
+  useEffect(() => {
+    if (!session) return;
+    const saved = localStorage.getItem(pendingKey(session.username));
+    if (!saved) return;
+    try {
+      const pending = JSON.parse(saved) as PendingCommand;
+      if (pending.username === session.username) void recoverCommand(pending);
+    } catch { localStorage.removeItem(pendingKey(session.username)); }
+  }, [session, recoverCommand]);
+  async function submitCommand(action: PendingCommand["action"], gameCode: string, expectedVersion: number, payload: Record<string, unknown> = {}): Promise<PlayerGameView | null> {
+    if (!session || busy || recoveryRunning.current || localStorage.getItem(pendingKey(session.username))) return null;
+    const pending: PendingCommand = { username: session.username, gameCode, action, body: { ...payload, commandId: crypto.randomUUID(), expectedVersion } };
+    localStorage.setItem(pendingKey(session.username), JSON.stringify(pending));
+    return recoverCommand(pending);
+  }
+
   useEffect(() => { const unlock = () => unlockGameAudio(); window.addEventListener("pointerdown", unlock, { once: true }); window.addEventListener("keydown", unlock, { once: true }); return () => { window.removeEventListener("pointerdown", unlock); window.removeEventListener("keydown", unlock); }; }, []);
   useEffect(() => { let active = true; void auth.restoreSession().then((restored) => { if (active) setSession(restored); }).finally(() => { if (active) setCheckingSession(false); }); return () => { active = false; }; }, []);
 
@@ -469,7 +530,7 @@ function App() {
       try {
         const state = await api.playerState();
         if (!active) return;
-        setNetwork("connected"); setConnectionBlocked(false);
+        if (!recoveryRunning.current) { setNetwork("connected"); setConnectionBlocked(false); }
         setActiveGameCode(state.state === "PLAYING" ? state.gameCode : null);
         setSearchStartedAt(state.state === "SEARCHING" ? state.searchStartedAt : null);
       } catch (caught) {
@@ -522,7 +583,8 @@ function App() {
           const update = await api.updates(game.gameCode, pollVersion.current, controller.signal);
           window.clearTimeout(watchdog);
           if (!active) break;
-          failures = 0; lastSuccessAt = Date.now(); setNetwork("connected"); setConnectionBlocked(false);
+          failures = 0; lastSuccessAt = Date.now();
+          if (!recoveryRunning.current) { setNetwork("connected"); setConnectionBlocked(false); }
           if (update.type === "GAME_UPDATED") applyGame(update.game);
           else { pollVersion.current = Math.max(pollVersion.current, update.version); setGame((current) => current ? { ...current, players: update.players } : current); }
         } catch (caught) {
@@ -555,7 +617,8 @@ function App() {
           const update = await api.matchmakingUpdates(controller.signal);
           window.clearTimeout(watchdog);
           if (!active) break;
-          failures = 0; lastSuccessAt = Date.now(); setNetwork("connected"); setConnectionBlocked(false);
+          failures = 0; lastSuccessAt = Date.now();
+          if (!recoveryRunning.current) { setNetwork("connected"); setConnectionBlocked(false); }
           if (update.type === "MATCH_FOUND") {
             setSearchStartedAt(null); setActiveGameCode(update.gameCode); navigate(gamePath(update.gameCode), { replace: true }); break;
           }
@@ -597,22 +660,22 @@ function App() {
     } catch (caught) { handleFailure(caught, "Could not cancel matchmaking."); }
     finally { setBusy(""); }
   }
-  async function fire(row: number, column: number) { if (!session || !game || busy || !game.isYourTurn || network !== "connected") return; unlockGameAudio(); setPendingShot({ row, column }); setBusy("fire"); setError(""); try { const response = await api.fire(game.gameCode, row, column); applyGame(response.game); await delay(360); } catch (caught) { handleFailure(caught, "That square could not be played."); } finally { setPendingShot(null); setBusy(""); } }
+  async function fire(row: number, column: number) { if (!session || !game || busy || !game.isYourTurn || network !== "connected") return; unlockGameAudio(); setPendingShot({ row, column }); try { await submitCommand("fire", game.gameCode, game.version, { coordinate: { row, column } }); await delay(360); } finally { setPendingShot(null); } }
 
   const loading = <LoadingScreen />;
   const checkingIdentity = checkingSession || Boolean(session && checkingPlayerState);
   const authenticate = (next: Session) => { const destination = requestedPath(location.state) ?? "/"; setSession(next); setAuthNotice(""); navigate(destination, { replace: true }); };
   const searching = Boolean(searchStartedAt);
-  const lobby = session ? <LobbyGate activeGameCode={activeGameCode} searching={searching} checking={checkingPlayerState} loading={loading}><Lobby username={session.username} network={network} busy={busy} error={error} onPublic={() => void startMatchmaking()} onCreate={() => void startGame("create", () => api.createGame())} onJoin={(code) => void startGame("join", () => api.joinGame(code))} /></LobbyGate> : null;
+  const lobby = session ? <LobbyGate activeGameCode={activeGameCode} searching={searching} checking={checkingPlayerState} loading={loading}><Lobby username={session.username} network={network} busy={busy} error={error} onPublic={() => void startMatchmaking()} onCreate={() => void startGame("create", () => api.createGame())} onJoin={(code) => void submitCommand("join", code, 1)} /></LobbyGate> : null;
   const matchmaking = session ? <MatchmakingGate activeGameCode={activeGameCode} searching={searching} checking={checkingPlayerState} loading={loading}><MatchmakingScreen startedAt={searchStartedAt!} busy={busy === "cancel-search"} error={error} onCancel={() => void cancelMatchmaking()} /></MatchmakingGate> : null;
   let gameContent = loading;
   if (!loadingGame && gameLoadError) gameContent = <RouteMessage eyebrow="GAME UNAVAILABLE" title="Game could not be opened" message={gameLoadError} actionLabel="Back to lobby" onAction={() => navigate("/lobby")} />;
   else if (!loadingGame && game?.gameCode === routedGameCode) {
-    if (game.status === "WAITING") gameContent = <WaitingRoom game={game} busy={Boolean(busy)} error={error} onCancel={() => void runGameAction("cancel", () => api.cancel(game.gameCode))} />;
-    else if (game.status === "PLACEMENT") gameContent = <FleetPlacement game={game} network={network} busy={Boolean(busy)} error={error} onSubmit={(ships) => void runGameAction("fleet", () => api.placeFleet(game.gameCode, toPlacements(ships)))} onCancel={() => void runGameAction("cancel", () => api.cancel(game.gameCode))} />;
+    if (game.status === "WAITING") gameContent = <WaitingRoom game={game} busy={Boolean(busy)} error={error} onCancel={() => void submitCommand("cancel", game.gameCode, game.version)} />;
+    else if (game.status === "PLACEMENT") gameContent = <FleetPlacement game={game} network={network} busy={Boolean(busy)} error={error} onSubmit={(ships) => void submitCommand("fleet", game.gameCode, game.version, { ships: toPlacements(ships) })} onCancel={() => void submitCommand("cancel", game.gameCode, game.version)} />;
     else gameContent = <Battle game={game} network={network} busy={Boolean(busy)} error={error} pendingShot={pendingShot} onFire={fire} onSurrender={() => setConfirmingSurrender(true)} onLobby={() => { setError(""); navigate("/lobby"); }} />;
   }
-  const frame = (content: ReactNode, overlays: "none" | "game" | "matchmaking" = "none") => session ? <div className="app-frame"><AppHeader username={session.username} network={network} onLobby={() => navigate("/lobby")} onProfile={() => navigate("/profile")} onLogout={() => logout()} />{content}{overlays !== "none" && connectionBlocked && network !== "connected" && (overlays === "matchmaking" || game?.gameCode === routedGameCode) && <ConnectionOverlay state={network} searching={overlays === "matchmaking"} onRetry={() => { setNetwork(navigator.onLine ? "reconnecting" : "offline"); setRetryNonce((value) => value + 1); }} onLogout={() => logout()} />}{overlays === "game" && confirmingSurrender && game?.gameCode === routedGameCode && <ConfirmDialog onCancel={() => setConfirmingSurrender(false)} onConfirm={() => { setConfirmingSurrender(false); void runGameAction("surrender", () => api.surrender(game.gameCode)); }} />}</div> : loading;
+  const frame = (content: ReactNode, overlays: "none" | "game" | "matchmaking" = "none") => session ? <div className="app-frame"><AppHeader username={session.username} network={network} onLobby={() => navigate("/lobby")} onProfile={() => navigate("/profile")} onLogout={() => logout()} />{content}{overlays !== "none" && connectionBlocked && network !== "connected" && (overlays === "matchmaking" || game?.gameCode === routedGameCode) && <ConnectionOverlay state={network} searching={overlays === "matchmaking"} onRetry={() => { setNetwork(navigator.onLine ? "reconnecting" : "offline"); setRetryNonce((value) => value + 1); }} onLogout={() => logout()} />}{overlays === "game" && confirmingSurrender && game?.gameCode === routedGameCode && <ConfirmDialog onCancel={() => setConfirmingSurrender(false)} onConfirm={() => { setConfirmingSurrender(false); void submitCommand("surrender", game.gameCode, game.version); }} />}</div> : loading;
   const profileGate = (content: ReactNode) => <LobbyGate activeGameCode={activeGameCode} searching={searching} checking={checkingPlayerState} loading={loading}>{frame(content)}</LobbyGate>;
 
   return <Routes>
