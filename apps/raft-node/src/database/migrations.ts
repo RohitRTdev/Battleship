@@ -82,6 +82,20 @@ const migrations = [
 
       CREATE INDEX match_archive_jobs_available_idx ON match_archive_jobs (available_at, created_at);
     `
+  },
+  {
+    version: 4,
+    sql: `
+      CREATE TABLE player_statistics (
+        player_id TEXT PRIMARY KEY,
+        matches_played INTEGER NOT NULL DEFAULT 0,
+        wins INTEGER NOT NULL DEFAULT 0,
+        losses INTEGER NOT NULL DEFAULT 0,
+        surrenders INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX games_finished_retention_idx ON games (ended_at)
+        WHERE status = 'FINISHED' AND ended_at IS NOT NULL;
+    `
   }
 ] as const;
 

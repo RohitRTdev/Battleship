@@ -20,6 +20,23 @@ resource "aws_s3_bucket" "match_archive" {
   tags          = local.tags
 }
 
+# Lifecycle is a backup for the application's completion-time cleanup.
+resource "aws_s3_bucket_lifecycle_configuration" "match_archive" {
+  bucket = aws_s3_bucket.match_archive.id
+  rule {
+    id = "expire-match-details"
+    status = "Enabled"
+    filter { prefix = "details/" }
+    expiration { days = 7 }
+  }
+  rule {
+    id = "expire-match-summaries"
+    status = "Enabled"
+    filter { prefix = "history/" }
+    expiration { days = 30 }
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "match_archive" {
   bucket                  = aws_s3_bucket.match_archive.id
   block_public_acls       = true
@@ -213,7 +230,7 @@ resource "aws_iam_role_policy" "match_archive" {
     Version = "2012-10-17"
     Statement = [
       { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.match_archive.arn },
-      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = "${aws_s3_bucket.match_archive.arn}/*" }
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = "${aws_s3_bucket.match_archive.arn}/*" }
     ]
   })
 }

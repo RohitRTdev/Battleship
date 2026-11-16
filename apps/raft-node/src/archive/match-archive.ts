@@ -4,24 +4,21 @@ import type {
   ArchivedMatchDetail,
   ArchivedPlayer,
   PlayerMatchSummary,
-  PlayerStatistics,
   ShipView
 } from "@battleship/game-contract";
 import type { GameState } from "../game/index.js";
 
 export type ArchivePage = {
-  statistics: PlayerStatistics;
   matches: PlayerMatchSummary[];
   nextCursor: string | null;
 };
 
 export interface MatchArchive {
   archiveMatch(state: GameState): Promise<void>;
+  deleteExpired?(now: number): Promise<void>;
   listPlayerMatches(playerId: string, cursor: string | null, limit: number): Promise<ArchivePage>;
   getPlayerMatch(playerId: string, matchId: string): Promise<ArchivedMatchDetail | null>;
 }
-
-export const EMPTY_STATISTICS: PlayerStatistics = { matchesPlayed: 0, wins: 0, losses: 0, surrenders: 0 };
 
 export function playerPathPart(playerId: string): string {
   return encodeURIComponent(playerId);
@@ -30,19 +27,6 @@ export function playerPathPart(playerId: string): string {
 export function historyFileName(summary: PlayerMatchSummary): string {
   const reverseTime = String(9_999_999_999_999 - Date.parse(summary.endedAt)).padStart(13, "0");
   return `${reverseTime}_${summary.matchId}_${summary.outcome}_${summary.surrendered ? 1 : 0}.json`;
-}
-
-export function statisticsFromHistoryNames(names: string[]): PlayerStatistics {
-  const statistics = { ...EMPTY_STATISTICS };
-  for (const name of names) {
-    const match = /_([^_]+)_(WIN|LOSS)_([01])\.json$/.exec(name);
-    if (!match) continue;
-    statistics.matchesPlayed += 1;
-    if (match[2] === "WIN") statistics.wins += 1;
-    else statistics.losses += 1;
-    if (match[3] === "1") statistics.surrenders += 1;
-  }
-  return statistics;
 }
 
 export function encodeCursor(name: string): string {
