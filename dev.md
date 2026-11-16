@@ -58,7 +58,6 @@ The browser application uses React, TypeScript and Vite.
 
 ### `scripts/`: test clients
 
-- `auth_smoke.py`: concurrent registration and login checks.
 - `auth_users.py`: local test user management and Cognito bot provisioning.
 - `play_bot.py`: starts a game for a human to play against a bot.
 - `simulate_game.py`: runs automated bot games.

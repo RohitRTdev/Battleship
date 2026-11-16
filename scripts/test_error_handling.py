@@ -20,6 +20,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from common.auth_client import AuthClientError, delete_user, list_users, login, register
 
 
 def request(base: str, path: str, method: str = 'GET', body: bytes | None = None,
@@ -57,14 +58,24 @@ def body_tests(base: str) -> None:
     oversized = json.dumps({'padding': 'x' * 110_000}).encode()
     ships = json.dumps({'ships': [{'start': {'row': 0, 'column': 0},
                                    'end': {'row': 0, 'column': 1}}] * 1500}).encode()
-    for label, path, method, payload, status, code in (
-        ('Backend oversized fire', fire, 'POST', oversized, 413, 'INVALID_REQUEST'),
-        ('Backend oversized fleet', fleet, 'PUT', ships, 413, 'INVALID_REQUEST'),
-        ('Backend malformed JSON', fire, 'POST', b'{', 400, 'INVALID_REQUEST'),
-        ('Local auth oversized JSON', auth, 'POST', oversized, 413, None),
-        ('Local auth malformed JSON', auth, 'POST', b'{', 400, None),
-    ):
-        check(label, request(base, path, method, payload), status, code)
+    username = 'error-test-' + secrets.token_hex(8)
+    password = secrets.token_urlsafe(24)
+    if not register(base, username, password):
+        raise RuntimeError('Temporary test account unexpectedly already exists')
+    try:
+        token = login(base, username, password).access_token
+        for label, path, method, payload, status, code in (
+            ('Backend oversized fire', fire, 'POST', oversized, 413, 'INVALID_REQUEST'),
+            ('Backend oversized fleet', fleet, 'PUT', ships, 413, 'INVALID_REQUEST'),
+            ('Backend malformed JSON', fire, 'POST', b'{', 400, 'INVALID_REQUEST'),
+            ('Local auth oversized JSON', auth, 'POST', oversized, 413, None),
+            ('Local auth malformed JSON', auth, 'POST', b'{', 400, None),
+        ):
+            check(label, request(base, path, method, payload, token if path != auth else None), status, code)
+    finally:
+        user = next((user for user in list_users(base) if user.username == username), None)
+        if user is not None:
+            delete_user(base, int(user.id))
 
 
 def docker(*args: str) -> str:
@@ -143,7 +154,7 @@ def main() -> int:
             database_test(base)
         else:
             body_tests(base)
-    except (AssertionError, RuntimeError, URLError, OSError, subprocess.CalledProcessError) as error:
+    except (AssertionError, AuthClientError, RuntimeError, URLError, OSError, subprocess.CalledProcessError) as error:
         print(f'Test failed: {error}', file=sys.stderr)
         if isinstance(error, subprocess.CalledProcessError) and error.stderr:
             print(error.stderr.strip(), file=sys.stderr)
