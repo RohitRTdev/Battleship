@@ -29,6 +29,7 @@ setup_env() {
     echo "ENABLE_TEST_ROUTES=true" >> ".env"
   fi
   grep -q '^DISABLE_TIMEOUT=' ".env" || echo "DISABLE_TIMEOUT=false" >> ".env"
+  grep -q '^RATE_LIMIT_ENABLED=' ".env" || echo "RATE_LIMIT_ENABLED=true" >> ".env"
   grep -q '^AWS_PROFILE=.' ".env" || echo "AWS_PROFILE=default" >> ".env"
   grep -q '^AWS_REGION=.' ".env" || echo "AWS_REGION=ap-south-1" >> ".env"
   grep -q '^PROD_STACK_NAME=.' ".env" || echo "PROD_STACK_NAME=battleship-prod" >> ".env"
@@ -53,6 +54,8 @@ verify_aws() {
   check_command aws
   check_command terraform
   check_command docker
+  check_command python
+  check_command openssl
   if ! aws sts get-caller-identity >/dev/null 2>&1; then
     echo "AWS authentication failed for profile '$AWS_PROFILE'. Run: aws sso login --profile $AWS_PROFILE" >&2
     exit 1
@@ -61,6 +64,15 @@ verify_aws() {
 
 terraform_args() {
   echo "-var=aws_region=$AWS_REGION -var=name=$PROD_STACK_NAME"
+}
+
+guard_missing_tls_metadata() {
+  if [ ! -f .deployment/tls.json ]; then
+    previous_url=$(terraform -chdir=infra/terraform/app output -raw public_url 2>/dev/null || true)
+    case "$previous_url" in
+      https://*) echo "TLS metadata is missing for an existing HTTPS deployment; restore .deployment before continuing." >&2; exit 1 ;;
+    esac
+  fi
 }
 
 up_dev() {
@@ -109,15 +121,23 @@ up_prod() {
 
   echo "Deploying AWS application resources..."
   terraform -chdir=infra/terraform/app init -input=false
-  terraform -chdir=infra/terraform/app apply -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=$backend_image"
+  python scripts/prod_tls.py check-scope
+  guard_missing_tls_metadata
+  if [ ! -f .deployment/tls.json ]; then
+    python scripts/guarded_terraform_apply.py $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="rate_limit_enabled=${RATE_LIMIT_ENABLED:-true}" -var="backend_image=$backend_image" -var="certificate_arn="
+  fi
+  hostname=$(terraform -chdir=infra/terraform/app output -raw load_balancer_hostname)
+  certificate_arn=$(python scripts/prod_tls.py prepare "$hostname")
+  python scripts/guarded_terraform_apply.py $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="rate_limit_enabled=${RATE_LIMIT_ENABLED:-true}" -var="backend_image=$backend_image" -var="certificate_arn=$certificate_arn"
 
   public_url=$(terraform -chdir=infra/terraform/app output -raw public_url)
   user_pool_id=$(terraform -chdir=infra/terraform/app output -raw cognito_user_pool_id)
   app_client_id=$(terraform -chdir=infra/terraform/app output -raw cognito_app_client_id)
 
   mkdir -p .deployment
-  PROD_URL="$public_url" PROD_POOL="$user_pool_id" PROD_CLIENT="$app_client_id" node -e "require('node:fs').writeFileSync('.deployment/prod.json', JSON.stringify({url:process.env.PROD_URL,region:process.env.AWS_REGION,userPoolId:process.env.PROD_POOL,userPoolClientId:process.env.PROD_CLIENT},null,2))"
-  PROD_URL="$public_url" node -e "Promise.all([fetch(process.env.PROD_URL + '/config.json'),fetch(process.env.PROD_URL + '/api/backend/player/state')]).then(async ([config,api])=>{if(!config.ok||api.status!==401)throw new Error('production smoke test failed');console.log('Production smoke test passed')}).catch(error=>{console.error(error);process.exit(1)})"
+  PROD_URL="$public_url" PROD_POOL="$user_pool_id" PROD_CLIENT="$app_client_id" PROD_HOST="$hostname" PROD_CERT_ARN="$certificate_arn" node -e "require('node:fs').writeFileSync('.deployment/prod.json', JSON.stringify({url:process.env.PROD_URL,region:process.env.AWS_REGION,userPoolId:process.env.PROD_POOL,userPoolClientId:process.env.PROD_CLIENT,hostname:process.env.PROD_HOST,certificateArn:process.env.PROD_CERT_ARN,certificatePath:'server.crt'},null,2))"
+  python scripts/prod_smoke.py "$public_url"
+  echo "Self-signed public certificate: .deployment/server.crt (browsers must trust it)"
   echo "Production deployment complete: $public_url"
 }
 
@@ -132,7 +152,14 @@ down_prod() {
     echo "No local production Terraform state was found; refusing an unscoped deletion." >&2
     exit 1
   fi
-  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="backend_image=destroy"
+  python scripts/prod_tls.py check-scope
+  guard_missing_tls_metadata
+  certificate_arn=""
+  if [ -f .deployment/tls.json ]; then
+    certificate_arn=$(python -c "import json; print(json.load(open('.deployment/tls.json')).get('arn') or '')")
+  fi
+  terraform -chdir=infra/terraform/app destroy -auto-approve -input=false $(terraform_args) -var="disable_timeout=${DISABLE_TIMEOUT:-false}" -var="rate_limit_enabled=${RATE_LIMIT_ENABLED:-true}" -var="backend_image=destroy" -var="certificate_arn=$certificate_arn"
+  python scripts/prod_tls.py delete
   terraform -chdir=infra/terraform/bootstrap destroy -auto-approve -input=false $(terraform_args)
   rm -rf .deployment
   echo "Production resources and data were deleted."

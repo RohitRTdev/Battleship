@@ -96,12 +96,6 @@ resource "aws_route_table_association" "public" {
 resource "aws_security_group" "alb" {
   name_prefix = "${var.name}-alb-"
   vpc_id      = aws_vpc.main.id
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -257,6 +251,7 @@ resource "aws_ecs_task_definition" "backend" {
     portMappings = [{ containerPort = 8080, protocol = "tcp" }],
     environment = [
       { name = "APP_ENV", value = "prod" }, { name = "DISABLE_TIMEOUT", value = tostring(var.disable_timeout) }, { name = "HTTP_PORT", value = "8080" },
+      { name = "RATE_LIMIT_ENABLED", value = tostring(var.rate_limit_enabled) },
       { name = "AWS_REGION", value = var.aws_region }, { name = "COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.main.id },
       { name = "COGNITO_APP_CLIENT_ID", value = aws_cognito_user_pool_client.web.id }, { name = "PGHOST", value = aws_db_instance.main.address },
       { name = "PGPORT", value = tostring(aws_db_instance.main.port) }, { name = "PGDATABASE", value = "battleship" }, { name = "PGUSER", value = "battleship" },
@@ -297,9 +292,45 @@ resource "aws_lb_listener" "http" {
   port              = 80
   protocol          = "HTTP"
   default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+  depends_on = [aws_lb_listener.https]
+}
+# ECS requires the target group to be attached to a listener during bootstrap.
+# This listener remains private: the load balancer security group never opens 8081.
+resource "aws_lb_listener" "bootstrap" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 8081
+  protocol          = "HTTP"
+  default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.backend.arn
   }
+}
+resource "aws_lb_listener" "https" {
+  count             = var.certificate_arn == "" ? 0 : 1
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+  certificate_arn   = var.certificate_arn
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.backend.arn
+  }
+}
+resource "aws_vpc_security_group_ingress_rule" "alb_public" {
+  for_each          = var.certificate_arn == "" ? toset([]) : toset(["80", "443"])
+  security_group_id = aws_security_group.alb.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = tonumber(each.value)
+  to_port           = tonumber(each.value)
+  ip_protocol       = "tcp"
+  depends_on        = [aws_lb_listener.http]
 }
 
 resource "aws_ecs_service" "backend" {
@@ -319,7 +350,7 @@ resource "aws_ecs_service" "backend" {
     container_name   = "backend"
     container_port   = 8080
   }
-  depends_on = [aws_lb_listener.http]
+  depends_on = [aws_lb_listener.bootstrap]
   tags       = local.tags
 }
 resource "aws_appautoscaling_target" "backend" {
@@ -378,6 +409,7 @@ resource "aws_cloudwatch_metric_alarm" "cpu_scale_in" {
   }
 }
 
-output "public_url" { value = "http://${aws_lb.main.dns_name}" }
+output "load_balancer_hostname" { value = aws_lb.main.dns_name }
+output "public_url" { value = "${var.certificate_arn == "" ? "http" : "https"}://${aws_lb.main.dns_name}" }
 output "cognito_user_pool_id" { value = aws_cognito_user_pool.main.id }
 output "cognito_app_client_id" { value = aws_cognito_user_pool_client.web.id }

@@ -18,6 +18,7 @@ import aiohttp
 import boto3
 
 from common.bot_names import bot_password
+from common.tls import production_ssl_context
 from play_bot import random_fleet
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -385,7 +386,7 @@ async def run(args):
     failure = None
     try:
         timeout = aiohttp.ClientTimeout(total=max(args.timeout, 30))
-        async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(limit=0)) as http:
+        async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(limit=0, ssl=production_ssl_context())) as http:
             created_matches = []
             client_id = config['userPoolClientId']
             seed = os.environ.get('BATTLESHIP_BOT_PASSWORD_SEED', 'battleship-local-bot-seed')

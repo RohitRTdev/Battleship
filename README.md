@@ -2,8 +2,9 @@
 
 - Docker v28
 - Node.js v24, npm v11
-- Python v3.13, available through the `python` command
+- Python v3.13
 - AWS CLI v2 and Terraform v1.7+ for production deployment
+- OpenSSL for the production HTTPS certificate
 - A POSIX environment to run commands (Git bash, WSL, Msys2, Linux, MacOS)
 
 ## Run the project
@@ -27,7 +28,9 @@ aws login
 ./setup.sh up prod
 ```
 
-Following this, you may access the public url mentioned in output log of the script, to play the game
+Following this, you may access the public url mentioned in output log of the script, to play the game.
+This will create a `.deployment` folder. Please do not delete this folder as it is used by test scripts and
+`setup.sh` to track the created resource metadata. It will be auto deleted when `setup.sh down prod` is invoked.
 
 To stop development build:
 
@@ -39,7 +42,7 @@ If you have deployed application (./setup.sh up prod), then you can terminate th
 ```sh
 ./setup.sh down prod
 ```
-Note: This will also destroy the application database, which means game data and user login data will be gone.
+Note: This also destroys the application database and users, deletes this deployment's imported ACM certificate, and removes `.deployment`. If cleanup fails, its metadata is retained so `down prod` can be retried.
 
 Show command usage:
 
