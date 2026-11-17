@@ -139,7 +139,7 @@ class Player:
                 elif state['state'] == 'SEARCHING':
                     if self.readiness:
                         self.readiness.update(self.name, False)
-                    await self.request('GET', '/matchmaking/updates')
+                    await self.request('GET', f'/matchmaking/updates?searchId={state["searchId"]}')
                 elif state['state'] == 'PLAYING':
                     await self.play_step(state['gameCode'], stop)
                 else:

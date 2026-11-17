@@ -114,6 +114,15 @@ const migrations = [
         PRIMARY KEY (game_id, actor_player_id, command_id)
       );
     `
+  },
+  {
+    version: 6,
+    sql: `
+      ALTER TABLE matchmaking_queue
+        ADD COLUMN lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (clock_timestamp() + interval '6 seconds'),
+        ADD COLUMN poll_token UUID;
+      CREATE INDEX matchmaking_queue_lease_idx ON matchmaking_queue (lease_expires_at);
+    `
   }
 ] as const;
 

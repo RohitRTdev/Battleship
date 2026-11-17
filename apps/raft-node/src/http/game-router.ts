@@ -112,8 +112,8 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
   router.get("/matchmaking/updates", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     const playerId = request.user!.id;
-    const initial = await repository.getPlayerState(playerId);
-    if (initial.state !== "SEARCHING") return matchmakingUpdate(response, initial);
+    const searchId = request.query.searchId;
+    if (typeof searchId !== "string" || !/^[1-9][0-9]*$/.test(searchId)) return sendError(response, domainError("INVALID_REQUEST"));
 
     let closed = false;
     let notified = false;
@@ -122,30 +122,29 @@ export function createGameRouter(repository: GameRepository, updates: GameUpdate
     const onClose = () => { closed = true; wake?.("closed"); };
     updates.onPlayer(playerId, onUpdate);
     response.on("close", onClose);
-
-    // If the read fails, unsubscribe before the error propagates, or the listeners leak.
-    const secondRead = await repository.getPlayerState(playerId).catch((error: unknown) => {
+    let token: string | null = null;
+    try {
+      const initial = await repository.beginMatchmakingPoll(playerId, searchId);
+      token = initial.token;
+      if (!token) {
+        if (!closed) matchmakingUpdate(response, initial.state);
+        return;
+      }
+      const secondRead = await repository.getPlayerState(playerId);
+      if (secondRead.state === "SEARCHING" && secondRead.searchId === searchId && !closed && !notified) {
+        await new Promise<"update" | "timeout" | "closed">((resolve) => {
+          const timer = setTimeout(() => resolve("timeout"), 3_000);
+          wake = (value) => { clearTimeout(timer); resolve(value); };
+        });
+      }
+      const state = await repository.finishMatchmakingPoll(playerId, searchId, token);
+      token = null;
+      if (!closed && !response.writableEnded) matchmakingUpdate(response, state);
+    } finally {
       updates.offPlayer(playerId, onUpdate);
       response.off("close", onClose);
-      throw error;
-    });
-    if (secondRead.state !== "SEARCHING") {
-      updates.offPlayer(playerId, onUpdate);
-      response.off("close", onClose);
-      return matchmakingUpdate(response, secondRead);
+      if (token) await repository.finishMatchmakingPoll(playerId, searchId, token);
     }
-
-    let reason: "update" | "timeout" | "closed" = "update";
-    if (!closed && !notified) {
-      reason = await new Promise((resolve) => {
-        const timer = setTimeout(() => resolve("timeout"), 3_000);
-        wake = (value) => { clearTimeout(timer); resolve(value); };
-      });
-    }
-    updates.offPlayer(playerId, onUpdate);
-    response.off("close", onClose);
-    if (reason === "closed" || response.writableEnded) return;
-    matchmakingUpdate(response, await repository.getPlayerState(playerId));
   });
 
   router.post("/games", async (request, response) => {

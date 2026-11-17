@@ -96,7 +96,7 @@ export type PlayerGameView = {
 
 export type PlayerStateResponse =
   | { state: "NOT_PLAYING" }
-  | { state: "SEARCHING"; searchStartedAt: string }
+  | { state: "SEARCHING"; searchStartedAt: string; searchId: string }
   | { state: "PLAYING"; gameCode: string; gameStatus: GameStatus };
 
 export type MatchmakingUpdateResponse =

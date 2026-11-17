@@ -432,6 +432,9 @@ function App() {
   const [playerStateReadyFor, setPlayerStateReadyFor] = useState<string | null>(null);
   const [activeGameCode, setActiveGameCode] = useState<string | null>(null);
   const [searchStartedAt, setSearchStartedAt] = useState<string | null>(null);
+  const [searchId, setSearchId] = useState<string | null>(null);
+  const searchIdRef = useRef<string | null>(null);
+  searchIdRef.current = searchId;
   const [game, setGame] = useState<PlayerGameView | null>(null);
   const [loadingGame, setLoadingGame] = useState(false);
   const [gameLoadError, setGameLoadError] = useState("");
@@ -447,7 +450,7 @@ function App() {
   sessionRef.current = session;
   const checkingPlayerState = Boolean(session && playerStateReadyFor !== session.username);
   const applyGame = useCallback((next: PlayerGameView) => {
-    setSearchStartedAt(null);
+    setSearchStartedAt(null); setSearchId(null);
     if (pollGameCode.current !== next.gameCode) {
       pollGameCode.current = next.gameCode;
       pollVersion.current = next.version;
@@ -458,7 +461,7 @@ function App() {
     setActiveGameCode((current) => next.status === "FINISHED" ? (current === next.gameCode ? null : current) : next.gameCode);
     setGame((current) => current?.gameCode === next.gameCode && current.version > next.version ? current : next);
   }, []);
-  const logout = useCallback((notice = "") => { matchmakingController.current?.abort(); void auth.logout(); setSession(null); setActiveGameCode(null); setSearchStartedAt(null); setGame(null); setGameLoadError(""); pollGameCode.current = null; pollVersion.current = 0; setBusy(""); setError(""); setAuthNotice(notice); setConnectionBlocked(false); setConfirmingSurrender(false); navigate("/login", { replace: true }); }, [navigate]);
+  const logout = useCallback((notice = "") => { const wasSearching = Boolean(searchIdRef.current); matchmakingController.current?.abort(); setBusy("cancel-search"); void (async () => { if (wasSearching) await api.cancelMatchmaking().catch(() => undefined); await auth.logout().catch(() => undefined); setSession(null); setBusy(""); navigate("/login", { replace: true }); })(); setSearchId(null); setActiveGameCode(null); setSearchStartedAt(null); setGame(null); setGameLoadError(""); pollGameCode.current = null; pollVersion.current = 0; setError(""); setAuthNotice(notice); setConnectionBlocked(false); setConfirmingSurrender(false); }, [navigate]);
   const handleFailure = useCallback((caught: unknown, fallback: string) => { if (caught instanceof SessionExpiredError || (caught instanceof ApiFailure && caught.status === 401)) { logout("Your session expired. Sign in again to continue."); return; } setError(caught instanceof Error ? caught.message : fallback); }, [logout]);
 
   type PendingCommand = { username: string; gameCode: string; action: "join" | "fleet" | "fire" | "cancel" | "surrender"; body: { commandId: string; expectedVersion: number } & Record<string, unknown>; response?: { game: PlayerGameView; outcome?: AttackView } };
@@ -523,7 +526,7 @@ function App() {
   useEffect(() => { let active = true; void auth.restoreSession().then((restored) => { if (active) setSession(restored); }).finally(() => { if (active) setCheckingSession(false); }); return () => { active = false; }; }, []);
 
   useEffect(() => {
-    if (!session) { setPlayerStateReadyFor(null); setActiveGameCode(null); setSearchStartedAt(null); return; }
+    if (!session) { setPlayerStateReadyFor(null); setActiveGameCode(null); setSearchStartedAt(null); setSearchId(null); return; }
     let active = true;
     void (async () => {
       setPlayerStateReadyFor(null);
@@ -533,6 +536,7 @@ function App() {
         if (!recoveryRunning.current) { setNetwork("connected"); setConnectionBlocked(false); }
         setActiveGameCode(state.state === "PLAYING" ? state.gameCode : null);
         setSearchStartedAt(state.state === "SEARCHING" ? state.searchStartedAt : null);
+        setSearchId(state.state === "SEARCHING" ? state.searchId : null);
       } catch (caught) {
         if (active) { setNetwork(navigator.onLine ? "reconnecting" : "offline"); handleFailure(caught, "Could not restore your game."); }
       } finally { if (active) setPlayerStateReadyFor(session.username); }
@@ -600,7 +604,7 @@ function App() {
   }, [session, routedGameCode, game?.gameCode, game?.status, retryNonce, logout, applyGame]);
 
   useEffect(() => {
-    if (!session || !matchmakingRoute || !searchStartedAt || busy === "cancel-search") return;
+    if (!session || !matchmakingRoute || !searchStartedAt || !searchId || busy === "cancel-search") return;
     let active = true; let failures = 0; let watchdog: number | undefined; let lastSuccessAt = Date.now();
     const armWatchdog = () => {
       window.clearTimeout(watchdog);
@@ -614,16 +618,16 @@ function App() {
         matchmakingController.current = controller;
         armWatchdog();
         try {
-          const update = await api.matchmakingUpdates(controller.signal);
+          const update = await api.matchmakingUpdates(searchId, controller.signal);
           window.clearTimeout(watchdog);
           if (!active) break;
           failures = 0; lastSuccessAt = Date.now();
           if (!recoveryRunning.current) { setNetwork("connected"); setConnectionBlocked(false); }
           if (update.type === "MATCH_FOUND") {
-            setSearchStartedAt(null); setActiveGameCode(update.gameCode); navigate(gamePath(update.gameCode), { replace: true }); break;
+            setSearchStartedAt(null); setSearchId(null); setActiveGameCode(update.gameCode); navigate(gamePath(update.gameCode), { replace: true }); break;
           }
           if (update.type === "NOT_SEARCHING") {
-            setSearchStartedAt(null); setActiveGameCode(null); navigate("/lobby", { replace: true }); break;
+            setSearchStartedAt(null); setSearchId(null); setActiveGameCode(null); navigate("/lobby", { replace: true }); break;
           }
           setSearchStartedAt(update.searchStartedAt);
         } catch (caught) {
@@ -636,7 +640,7 @@ function App() {
       }
     })();
     return () => { active = false; window.clearTimeout(watchdog); matchmakingController.current?.abort(); matchmakingController.current = null; };
-  }, [session, matchmakingRoute, searchStartedAt, busy, retryNonce, logout, navigate]);
+  }, [session, matchmakingRoute, searchStartedAt, searchId, busy, retryNonce, logout, navigate]);
 
   async function runGameAction(name: string, action: () => Promise<{ game: PlayerGameView }>): Promise<PlayerGameView | null> { if (!session || busy) return null; setBusy(name); setError(""); try { const response = await action(); applyGame(response.game); return response.game; } catch (caught) { handleFailure(caught, "That action could not be completed."); return null; } finally { setBusy(""); } }
   async function startGame(name: "create" | "join", action: () => Promise<{ game: PlayerGameView }>) { const next = await runGameAction(name, action); if (next) navigate(gamePath(next.gameCode)); }
@@ -645,8 +649,8 @@ function App() {
     setBusy("matchmaking"); setError("");
     try {
       const state = await api.startMatchmaking();
-      if (state.state === "PLAYING") { setSearchStartedAt(null); setActiveGameCode(state.gameCode); navigate(gamePath(state.gameCode)); }
-      else if (state.state === "SEARCHING") { setActiveGameCode(null); setSearchStartedAt(state.searchStartedAt); navigate(matchmakingPath); }
+      if (state.state === "PLAYING") { setSearchStartedAt(null); setSearchId(null); setActiveGameCode(state.gameCode); navigate(gamePath(state.gameCode)); }
+      else if (state.state === "SEARCHING") { setActiveGameCode(null); setSearchStartedAt(state.searchStartedAt); setSearchId(state.searchId); navigate(matchmakingPath); }
     } catch (caught) { handleFailure(caught, "Could not start public matchmaking."); }
     finally { setBusy(""); }
   }
@@ -655,8 +659,8 @@ function App() {
     setBusy("cancel-search"); setError(""); matchmakingController.current?.abort();
     try {
       const state = await api.cancelMatchmaking();
-      if (state.state === "PLAYING") { setSearchStartedAt(null); setActiveGameCode(state.gameCode); navigate(gamePath(state.gameCode), { replace: true }); }
-      else { setSearchStartedAt(null); setActiveGameCode(null); navigate("/lobby", { replace: true }); }
+      if (state.state === "PLAYING") { setSearchStartedAt(null); setSearchId(null); setActiveGameCode(state.gameCode); navigate(gamePath(state.gameCode), { replace: true }); }
+      else { setSearchStartedAt(null); setSearchId(null); setActiveGameCode(null); navigate("/lobby", { replace: true }); }
     } catch (caught) { handleFailure(caught, "Could not cancel matchmaking."); }
     finally { setBusy(""); }
   }

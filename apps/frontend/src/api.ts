@@ -77,7 +77,7 @@ export function createApi(auth: AuthProvider) {
     archivedMatch: (matchId: string, signal?: AbortSignal) => request<ArchivedMatchResponse>(`/api/backend/player/matches/${encodeURIComponent(matchId)}`, { signal }),
     startMatchmaking: () => request<PlayerStateResponse>("/api/backend/matchmaking", { method: "POST", body: {} }),
     cancelMatchmaking: () => request<PlayerStateResponse>("/api/backend/matchmaking", { method: "DELETE" }),
-    matchmakingUpdates: (signal: AbortSignal) => request<MatchmakingUpdateResponse>("/api/backend/matchmaking/updates", { signal }),
+    matchmakingUpdates: (searchId: string, signal: AbortSignal) => request<MatchmakingUpdateResponse>(`/api/backend/matchmaking/updates?searchId=${encodeURIComponent(searchId)}`, { signal }),
     getGame: (gameCode: string, signal?: AbortSignal) => request<GameResponse>(`/api/backend/games/${gameCode}`, { signal }),
     createGame: () => request<GameResponse>("/api/backend/games", { method: "POST", body: {} }),
     matchCommand: (gameCode: string, action: "join" | "fleet" | "fire" | "cancel" | "surrender", body: CommandMetadata & Record<string, unknown>) =>

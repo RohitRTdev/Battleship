@@ -55,6 +55,15 @@ async function expireTurns(): Promise<void> {
   finally { timeoutWorkerRunning = false; }
 }
 let timeoutTimer: NodeJS.Timeout | null = null;
+let matchmakingCleanupTimer: NodeJS.Timeout | null = null;
+let matchmakingCleanupRunning = false;
+async function expireMatchmaking(): Promise<void> {
+  if (matchmakingCleanupRunning || shuttingDown) return;
+  matchmakingCleanupRunning = true;
+  try { await repository.expireMatchmaking(); }
+  catch (error) { console.error("Matchmaking cleanup failed", error); }
+  finally { matchmakingCleanupRunning = false; }
+}
 const updates = new GameUpdateBus(database);
 const archive = createMatchArchive();
 const archiveWorker = new ArchiveWorker(database, archive, updates);
@@ -84,6 +93,7 @@ async function initializeDatabase(): Promise<void> {
         }, 15 * 60_000);
       }
       if (timeoutEnabled && !timeoutTimer) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
+      if (!matchmakingCleanupTimer) { void expireMatchmaking(); matchmakingCleanupTimer = setInterval(() => void expireMatchmaking(), 1_000); }
       databaseReady = true;
       return;
     } catch (error) {
@@ -165,6 +175,7 @@ function shutdown(): void {
   httpServer.close(() => {
     timeoutWorkerClosed = true;
     if (timeoutTimer) clearInterval(timeoutTimer);
+    if (matchmakingCleanupTimer) clearInterval(matchmakingCleanupTimer);
     retentionWorker.close();
     if (rateLimitCleanupTimer) clearInterval(rateLimitCleanupTimer);
     archiveWorker.close();

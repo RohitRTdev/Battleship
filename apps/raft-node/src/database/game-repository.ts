@@ -39,6 +39,7 @@ type PlayerStateRow = {
   code: string | null;
   status: GameStatus | null;
   enqueued_at: Date | null;
+  search_id: string | null;
 };
 
 const MATCHMAKING_LOCK_KEY = "1947452302";
@@ -129,20 +130,20 @@ async function lockPlayer(client: PoolClient, playerId: string): Promise<void> {
 }
 
 async function isSearching(client: PoolClient, playerId: string): Promise<boolean> {
-  const result = await client.query("SELECT 1 FROM matchmaking_queue WHERE player_id = $1", [playerId]);
+  const result = await client.query("SELECT 1 FROM matchmaking_queue WHERE player_id = $1 AND lease_expires_at > clock_timestamp()", [playerId]);
   return result.rowCount !== 0;
 }
 
 async function playerState(client: PoolClient, playerId: string): Promise<PlayerStateResponse> {
   const result = await client.query<PlayerStateRow>(
-    `SELECT 'PLAYING'::text AS activity, games.code, games.status, NULL::timestamptz AS enqueued_at, 1 AS priority
+    `SELECT 'PLAYING'::text AS activity, games.code, games.status, NULL::timestamptz AS enqueued_at, NULL::text AS search_id, 1 AS priority
      FROM active_player_games
      JOIN games ON games.id = active_player_games.game_id
      WHERE active_player_games.player_id = $1
      UNION ALL
-     SELECT 'SEARCHING'::text, NULL, NULL, enqueued_at, 2
+     SELECT 'SEARCHING'::text, NULL, NULL, enqueued_at, queue_id::text, 2
      FROM matchmaking_queue
-     WHERE player_id = $1
+     WHERE player_id = $1 AND lease_expires_at > clock_timestamp()
      ORDER BY priority
      LIMIT 1`,
     [playerId]
@@ -150,7 +151,7 @@ async function playerState(client: PoolClient, playerId: string): Promise<Player
   const row = result.rows[0];
   if (!row) return { state: "NOT_PLAYING" };
   if (row.activity === "SEARCHING") {
-    return { state: "SEARCHING", searchStartedAt: normalizeTime(row.enqueued_at!) };
+    return { state: "SEARCHING", searchStartedAt: normalizeTime(row.enqueued_at!), searchId: row.search_id! };
   }
   return { state: "PLAYING", gameCode: row.code!, gameStatus: row.status! };
 }
@@ -421,6 +422,7 @@ export class GameRepository {
     try {
       await client.query("BEGIN");
       await lockMatchmaking(client);
+      await this.deleteExpiredSearches(client);
       await lockPlayer(client, actor.id);
       const current = await playerState(client, actor.id);
       if (current.state === "PLAYING") {
@@ -451,15 +453,16 @@ export class GameRepository {
       }
 
       if (!opponent) {
-        const queued = await client.query<{ enqueued_at: Date }>(
+        const queued = await client.query<{ enqueued_at: Date; search_id: string }>(
           `INSERT INTO matchmaking_queue (player_id, username)
            VALUES ($1, $2)
-           RETURNING enqueued_at`,
+           RETURNING enqueued_at, queue_id::text AS search_id`,
           [actor.id, actor.username]
         );
         const state: PlayerStateResponse = {
           state: "SEARCHING",
-          searchStartedAt: normalizeTime(queued.rows[0].enqueued_at)
+          searchStartedAt: normalizeTime(queued.rows[0].enqueued_at),
+          searchId: queued.rows[0].search_id
         };
         await notifyPlayerUpdate(client, actor.id);
         await client.query("COMMIT");
@@ -524,6 +527,68 @@ export class GameRepository {
     } finally {
       client.release();
     }
+  }
+
+  private async deleteExpiredSearches(client: PoolClient): Promise<void> {
+    const removed = await client.query<{ player_id: string }>(
+      "DELETE FROM matchmaking_queue WHERE lease_expires_at <= clock_timestamp() RETURNING player_id"
+    );
+    for (const row of removed.rows) await notifyPlayerUpdate(client, row.player_id);
+  }
+
+  async expireMatchmaking(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await lockMatchmaking(client);
+      await this.deleteExpiredSearches(client);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async beginMatchmakingPoll(playerId: string, searchId: string): Promise<{ token: string | null; state: PlayerStateResponse }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await lockMatchmaking(client);
+      await this.deleteExpiredSearches(client);
+      const token = randomUUID();
+      const updated = await client.query(
+        `UPDATE matchmaking_queue SET poll_token = $3, lease_expires_at = clock_timestamp() + interval '9 seconds'
+         WHERE player_id = $1 AND queue_id::text = $2 AND lease_expires_at > clock_timestamp()`,
+        [playerId, searchId, token]
+      );
+      const state = await playerState(client, playerId);
+      await client.query("COMMIT");
+      // A request for a previous search must not observe or affect a newer one.
+      return { token: updated.rowCount ? token : null, state: state.state === "SEARCHING" && state.searchId !== searchId ? { state: "NOT_PLAYING" } : state };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async finishMatchmakingPoll(playerId: string, searchId: string, token: string): Promise<PlayerStateResponse> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await lockMatchmaking(client);
+      await this.deleteExpiredSearches(client);
+      await client.query(
+        `UPDATE matchmaking_queue SET lease_expires_at = clock_timestamp() + interval '6 seconds'
+         WHERE player_id = $1 AND queue_id::text = $2 AND poll_token = $3 AND lease_expires_at > clock_timestamp()`,
+        [playerId, searchId, token]
+      );
+      const state = await playerState(client, playerId);
+      await client.query("COMMIT");
+      return state.state === "SEARCHING" && state.searchId !== searchId ? { state: "NOT_PLAYING" } : state;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
   }
 
   async cancelMatchmaking(playerId: string): Promise<PlayerStateResponse> {
