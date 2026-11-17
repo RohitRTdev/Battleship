@@ -32,6 +32,7 @@ const CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 type GameRow = { id: string };
 type EventRow = { payload: PersistedCommand };
 type TimestampRow = { now: Date };
+type RecoveryRow = { id: string; last_success_before_gap: Date; recovered_at: Date };
 type ConstraintError = Error & { code?: string; constraint?: string };
 type QueueRow = { player_id: string; username: string; enqueued_at: Date };
 type PlayerStateRow = {
@@ -72,7 +73,7 @@ async function insertEvent(client: PoolClient, state: GameState, command: Persis
   await client.query(
     `INSERT INTO game_events (game_id, version, event_type, actor_player_id, payload, occurred_at)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
-    [state.gameId, state.version, command.type, command.actor.id, JSON.stringify(command), command.occurredAt]
+    [state.gameId, state.version, command.type, command.actor?.id ?? null, JSON.stringify(command), command.occurredAt]
   );
 }
 
@@ -163,6 +164,57 @@ function failed<T>(error: DomainError): Result<T> {
 export class GameRepository {
   constructor(private readonly pool: Pool, private readonly timeoutEnabled = true) {}
 
+  // This row is also the cross-replica recovery lock. Hold it until the
+  // transaction has finished checking or changing a game's deadlines.
+  private async heartbeat(client: PoolClient): Promise<void> {
+    const result = await client.query<{ last_success_at: Date }>(
+      "SELECT last_success_at FROM database_heartbeat WHERE id = true FOR UPDATE"
+    );
+    const last = result.rows[0].last_success_at;
+    // Read the clock after acquiring the lock, not before waiting for it.
+    const now = (await client.query<TimestampRow>("SELECT clock_timestamp() AS now")).rows[0].now;
+    if (now.getTime() - last.getTime() > 5_000) {
+      await client.query("INSERT INTO database_recoveries (last_success_before_gap, recovered_at) VALUES ($1, $2)", [last, now]);
+    }
+    await client.query("UPDATE database_heartbeat SET last_success_at = $1 WHERE id = true", [now]);
+  }
+
+  async recordHeartbeat(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.heartbeat(client);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  private async applyRecoveries(client: PoolClient, state: GameState): Promise<GameState> {
+    const recoveries = await client.query<RecoveryRow>(
+      `SELECT r.id, r.last_success_before_gap, r.recovered_at FROM database_recoveries r
+       JOIN games g ON g.id = $1
+       WHERE r.id > g.last_processed_recovery_id ORDER BY r.id`, [state.gameId]
+    );
+    for (const recovery of recoveries.rows) {
+      const oldDeadline = state.status === "ACTIVE" ? state.turnDeadlineAt : state.status === "PLACEMENT" ? state.placementDeadlineAt : null;
+      if (oldDeadline && Date.parse(state.createdAt) <= recovery.recovered_at.getTime() &&
+          Date.parse(oldDeadline) + 500 > recovery.last_success_before_gap.getTime()) {
+        const now = await databaseTime(client);
+        const duration = state.status === "ACTIVE" ? 30_000 : 60_000;
+        const command: GameCommand = { type: "DEADLINE_RESET", actor: null, recoveryId: recovery.id,
+          deadline: new Date(Date.parse(now) + duration).toISOString(), occurredAt: now };
+        const result = applyGameCommand(state, command);
+        if (!result.ok) throw new Error(result.error.code);
+        state = result.value.state;
+        await this.persistTransition(client, state, command);
+      }
+      await client.query("UPDATE games SET last_processed_recovery_id = $2 WHERE id = $1", [state.gameId, recovery.id]);
+    }
+    return state;
+  }
+
   async currentTime(): Promise<string> {
     const result = await this.pool.query<TimestampRow>("SELECT clock_timestamp() AS now");
     return normalizeTime(result.rows[0].now);
@@ -173,6 +225,7 @@ export class GameRepository {
       const client = await this.pool.connect();
       try {
         await client.query("BEGIN");
+        if (this.timeoutEnabled) await this.heartbeat(client);
         await lockPlayer(client, actor.id);
         if (await isSearching(client, actor.id)) {
           await client.query("ROLLBACK");
@@ -229,6 +282,7 @@ export class GameRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      if (this.timeoutEnabled) await this.heartbeat(client);
       await lockPlayer(client, actor.id);
       const game = await client.query<GameRow>("SELECT id FROM games WHERE code = $1 FOR UPDATE", [gameCode]);
       if (!game.rows[0]) {
@@ -249,13 +303,18 @@ export class GameRepository {
         await client.query("ROLLBACK");
         return failed(domainError("PLAYER_ALREADY_SEARCHING"));
       }
-      const state = await loadState(client, game.rows[0].id);
+      let state = await loadState(client, game.rows[0].id);
       // Only participants may learn the current version; joining is validated by the state machine.
       if (request && (request as { type?: string }).type !== "JOIN_GAME" && state.playerOne.id !== actor.id && state.playerTwo?.id !== actor.id) {
         await client.query("ROLLBACK");
         return failed(domainError("PLAYER_NOT_IN_GAME"));
       }
-      if (state.version !== metadata.expectedVersion) {
+      if (this.timeoutEnabled) state = await this.applyRecoveries(client, state);
+      const intervening = state.version === metadata.expectedVersion ? null : await client.query<{ count: string }>(
+        `SELECT count(*) AS count FROM game_events WHERE game_id = $1 AND version > $2 AND event_type <> 'DEADLINE_RESET'`,
+        [state.gameId, metadata.expectedVersion]
+      );
+      if (metadata.expectedVersion > state.version || (intervening && Number(intervening.rows[0].count) !== 0)) {
         await client.query("ROLLBACK");
         return failed(domainError("STALE_VERSION"));
       }
@@ -351,6 +410,19 @@ export class GameRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await this.heartbeat(client);
+      const pending = await client.query<GameRow>(`SELECT g.id FROM games g
+        WHERE g.status <> 'FINISHED' AND EXISTS (
+          SELECT 1 FROM database_recoveries r WHERE r.id > g.last_processed_recovery_id
+        ) ORDER BY g.created_at LIMIT 1 FOR UPDATE SKIP LOCKED`);
+      if (pending.rows[0]) {
+        await this.applyRecoveries(client, await loadState(client, pending.rows[0].id));
+        await client.query("COMMIT");
+        return true;
+      }
+      await client.query(`DELETE FROM database_recoveries r WHERE NOT EXISTS (
+        SELECT 1 FROM games g WHERE g.status <> 'FINISHED' AND g.last_processed_recovery_id < r.id
+      )`);
       const rows = await client.query<GameRow>(`SELECT id FROM games
         WHERE (status = 'ACTIVE' AND turn_deadline_at <= clock_timestamp() - interval '500 milliseconds')
            OR (status = 'PLACEMENT' AND placement_deadline_at <= clock_timestamp() - interval '500 milliseconds')
@@ -421,6 +493,7 @@ export class GameRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      if (this.timeoutEnabled) await this.heartbeat(client);
       await lockMatchmaking(client);
       await this.deleteExpiredSearches(client);
       await lockPlayer(client, actor.id);

@@ -22,6 +22,7 @@ const migrations = [
         placement_deadline_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ,
         ended_at TIMESTAMPTZ,
+        last_processed_recovery_id BIGINT NOT NULL DEFAULT 0,
         CONSTRAINT games_code_unique UNIQUE (code),
         CONSTRAINT games_second_player_complete CHECK ((player_two_id IS NULL) = (player_two_username IS NULL)),
         CONSTRAINT games_players_distinct CHECK (player_two_id IS NULL OR player_one_id <> player_two_id)
@@ -35,11 +36,12 @@ const migrations = [
       CREATE TABLE game_events (
         game_id UUID NOT NULL REFERENCES games(id) ON DELETE CASCADE,
         version INTEGER NOT NULL CHECK (version >= 1),
-        event_type TEXT NOT NULL CHECK (event_type IN ('CREATE_GAME', 'JOIN_GAME', 'PLACE_FLEET', 'FIRE', 'CANCEL_GAME', 'SURRENDER', 'TURN_TIMEOUT', 'PLACEMENT_TIMEOUT')),
-        actor_player_id TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN ('CREATE_GAME', 'JOIN_GAME', 'PLACE_FLEET', 'FIRE', 'CANCEL_GAME', 'SURRENDER', 'TURN_TIMEOUT', 'PLACEMENT_TIMEOUT', 'DEADLINE_RESET')),
+        actor_player_id TEXT,
         payload JSONB NOT NULL,
         occurred_at TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (game_id, version)
+        PRIMARY KEY (game_id, version),
+        CHECK ((event_type = 'DEADLINE_RESET') = (actor_player_id IS NULL))
       );
 
       CREATE TABLE active_player_games (
@@ -61,6 +63,16 @@ const migrations = [
         accepted_at TIMESTAMPTZ[] NOT NULL DEFAULT '{}',
         CHECK (cardinality(accepted_at) <= 20)
       );
+      CREATE TABLE database_heartbeat (
+        id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+        last_success_at TIMESTAMPTZ NOT NULL
+      );
+      INSERT INTO database_heartbeat (id, last_success_at) VALUES (TRUE, clock_timestamp());
+      CREATE TABLE database_recoveries (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        last_success_before_gap TIMESTAMPTZ NOT NULL,
+        recovered_at TIMESTAMPTZ NOT NULL
+      );
     `
   },
   {
@@ -70,8 +82,11 @@ const migrations = [
         queue_id BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
         player_id TEXT PRIMARY KEY,
         username TEXT NOT NULL,
-        enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+        enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (clock_timestamp() + interval '6 seconds'),
+        poll_token UUID
       );
+      CREATE INDEX matchmaking_queue_lease_idx ON matchmaking_queue (lease_expires_at);
     `
   },
   {
@@ -117,12 +132,7 @@ const migrations = [
   },
   {
     version: 6,
-    sql: `
-      ALTER TABLE matchmaking_queue
-        ADD COLUMN lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (clock_timestamp() + interval '6 seconds'),
-        ADD COLUMN poll_token UUID;
-      CREATE INDEX matchmaking_queue_lease_idx ON matchmaking_queue (lease_expires_at);
-    `
+    sql: `SELECT 1;`
   }
 ] as const;
 

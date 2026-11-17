@@ -71,6 +71,11 @@ export function createGame(command: CreateGameCommand): Result<Transition> {
 
 export function applyGameCommand(state: GameState, command: GameCommand): Result<Transition> {
   switch (command.type) {
+    case "DEADLINE_RESET": {
+      if (state.status === "ACTIVE" && state.turnDeadlineAt) return transition({ ...state, turnDeadlineAt: command.deadline }, command, { type: "DEADLINE_RESET" });
+      if (state.status === "PLACEMENT" && state.placementDeadlineAt) return transition({ ...state, placementDeadlineAt: command.deadline }, command, { type: "DEADLINE_RESET" });
+      return failure("GAME_NOT_ACTIVE");
+    }
     case "JOIN_GAME": {
       if (participant(state, command.actor.id)) return failure("PLAYER_ALREADY_IN_GAME");
       if (state.status === "FINISHED") {

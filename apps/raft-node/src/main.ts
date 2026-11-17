@@ -50,11 +50,25 @@ let timeoutWorkerClosed = false;
 async function expireTurns(): Promise<void> {
   if (timeoutWorkerRunning || timeoutWorkerClosed) return;
   timeoutWorkerRunning = true;
-  try { while (!timeoutWorkerClosed && await repository.expireOneTurn()) { /* drain expired games */ } }
+  try {
+    // Keep each sweep bounded; the next tick resumes any remaining work.
+    for (let processed = 0; processed < 100 && !timeoutWorkerClosed; processed += 1) {
+      if (!await repository.expireOneTurn()) break;
+    }
+  }
   catch (error) { console.error("Turn timeout worker failed", error); }
   finally { timeoutWorkerRunning = false; }
 }
 let timeoutTimer: NodeJS.Timeout | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
+let heartbeatRunning = false;
+async function recordHeartbeat(): Promise<void> {
+  if (heartbeatRunning || shuttingDown) return;
+  heartbeatRunning = true;
+  try { await repository.recordHeartbeat(); }
+  catch (error) { console.error("Database heartbeat failed", error); }
+  finally { heartbeatRunning = false; }
+}
 let matchmakingCleanupTimer: NodeJS.Timeout | null = null;
 let matchmakingCleanupRunning = false;
 async function expireMatchmaking(): Promise<void> {
@@ -92,7 +106,12 @@ async function initializeDatabase(): Promise<void> {
           void cleanupCommandRateLimits(database).catch((error: unknown) => console.error("Rate limit cleanup failed", error));
         }, 15 * 60_000);
       }
-      if (timeoutEnabled && !timeoutTimer) { void expireTurns(); timeoutTimer = setInterval(() => void expireTurns(), 1_000); }
+      if (timeoutEnabled && !timeoutTimer) {
+        void recordHeartbeat();
+        heartbeatTimer = setInterval(() => void recordHeartbeat(), 1_000);
+        void expireTurns();
+        timeoutTimer = setInterval(() => void expireTurns(), 1_000);
+      }
       if (!matchmakingCleanupTimer) { void expireMatchmaking(); matchmakingCleanupTimer = setInterval(() => void expireMatchmaking(), 1_000); }
       databaseReady = true;
       return;
@@ -175,6 +194,7 @@ function shutdown(): void {
   httpServer.close(() => {
     timeoutWorkerClosed = true;
     if (timeoutTimer) clearInterval(timeoutTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (matchmakingCleanupTimer) clearInterval(matchmakingCleanupTimer);
     retentionWorker.close();
     if (rateLimitCleanupTimer) clearInterval(rateLimitCleanupTimer);

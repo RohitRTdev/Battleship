@@ -53,6 +53,7 @@ export type GameCommand =
   | { type: "FIRE"; actor: Player; coordinate: Coordinate; occurredAt: string }
   | { type: "CANCEL_GAME"; actor: Player; occurredAt: string }
   | { type: "SURRENDER"; actor: Player; occurredAt: string }
+  | { type: "DEADLINE_RESET"; actor: null; recoveryId: string; deadline: string; occurredAt: string }
   | { type: "TURN_TIMEOUT"; actor: Player; deadline: string; occurredAt: string }
   | { type: "PLACEMENT_TIMEOUT"; actor: Player; deadline: string; occurredAt: string };
 
@@ -66,6 +67,7 @@ export type CommandOutcome =
   | { type: "GAME_CANCELLED" }
   | { type: "GAME_SURRENDERED" }
   | { type: "GAME_TIMED_OUT" }
+  | { type: "DEADLINE_RESET" }
   | {
       type: AttackResult;
       coordinate: Coordinate;
