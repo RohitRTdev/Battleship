@@ -85,6 +85,20 @@ app.post("/api/auth/register", (request, response) => {
   const { username, password } = request.body;
   const normUserName = username.trim().toLowerCase();
 
+  // Match the browser's UTF-16 length limit and reject invisible controls
+  // before trimming, so invalid characters cannot be hidden at either edge.
+  if (
+    username.length > 32 ||
+    normUserName.length === 0 ||
+    normUserName.length > 32 ||
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(username)
+  ) {
+    response.status(400).json({
+      error: "Username must be 1–32 characters and cannot contain control or bidirectional formatting characters"
+    });
+    return;
+  }
+
   // Insert new user into database
   try {
     insertUser.run(normUserName, password);
