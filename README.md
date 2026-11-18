@@ -3,7 +3,7 @@
 - Docker v28
 - Node.js v24, npm v11
 - Python v3.13
-- AWS CLI v2 and Terraform v1.7+ for production deployment
+- AWS CLI v2 (v2.32.0+ for `aws login`) and Terraform v1.7+ for production deployment
 - OpenSSL for the production HTTPS certificate
 - A POSIX environment to run commands (Git bash, WSL, Msys2, Linux, MacOS)
 
@@ -21,10 +21,15 @@ This creates `.env` when needed, generates a JWT secret, enables development tes
 http://localhost:8000
 ```
 
-Deploy the production application to AWS:
+For production deployment, sign in to the AWS profile that setup will use. Choose the command for your environment.
+
+- With AWS console credentials and a local browser, run `aws login`. Your IAM user or role needs the permissions granted by the `SignInLocalDevelopmentAccess` managed policy.
+- With console credentials on a headless terminal, run `aws login --remote` and follow the prompts on a second device with the AWS CLI and a browser.
+- With a configured IAM Identity Center profile, run `aws sso login --profile <profile>`, replacing `<profile>` with its name.
+
+Setup uses the `default` profile unless you set `AWS_PROFILE` in `.env`. If you use a named profile, create `.env` from `.env.example` if needed and set `AWS_PROFILE` to the profile you signed in with. Then deploy:
 
 ```sh
-aws login
 ./setup.sh up prod
 ```
 
