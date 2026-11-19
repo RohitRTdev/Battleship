@@ -1,6 +1,6 @@
 # Battleship developer guide
 
-This guide describes the checked-out `master` branch, which implements the shared PostgreSQL configuration. The separate `config-2` branch uses etcd and has a different backend structure; check that branch's README and source when working there. Despite the `raft-node` directory name, the backend described here does not implement Raft.
+The Battleship backend runs across replicas that share game state in PostgreSQL. Its implementation lives in `apps/raft-node/`.
 
 ## How a request moves through the system
 
@@ -74,8 +74,7 @@ Run a script with `--help` for its exact arguments. The README describes local a
 - `.env.example`: starter environment options; setup creates `.env` and secrets as needed.
 - `package.json` and `package-lock.json`: npm workspace scripts and dependency lock; `tsconfig.base.json` provides shared TypeScript settings.
 - `README.md`: prerequisites, operational commands, timeout settings and bot usage.
-- `CloudHack.pdf` and `prd.md`: original project proposal and its Markdown version. The proposal includes superseded architecture ideas.
-- `doc.pdf`: setup/testing handoff document, where present.
+- `prd.md` describes gameplay requirements, deployment modes and how the test clients verify game behavior.
 - `runtime/`, `.deployment/`, build outputs and load-test results are generated local or deployment artifacts rather than application source.
 
 ## Where to make common changes

@@ -57,7 +57,7 @@ verify_aws() {
   check_command python
   check_command openssl
   if ! aws sts get-caller-identity >/dev/null 2>&1; then
-    echo "AWS authentication failed for profile '$AWS_PROFILE'. Run: aws sso login --profile $AWS_PROFILE" >&2
+    echo "AWS authentication failed for profile '$AWS_PROFILE'. See README.md for console, headless, and IAM Identity Center sign-in options." >&2
     exit 1
   fi
 }

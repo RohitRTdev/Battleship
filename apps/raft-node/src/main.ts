@@ -167,6 +167,16 @@ app.use("/api/backend", authorizeUser(tokenVerifier),
   ...(rateLimitEnabled === "true" ? [commandRateLimiter(database)] : []),
   express.json({ limit: "32kb" }), createGameRouter(repository, updates, archive));
 
+if (production) {
+  app.get(/.*/, (request, response, next) => {
+    const pathname = request.path;
+    if (/^\/(?:api|assets)(?:\/|$)/i.test(pathname) || path.posix.extname(pathname) || !request.accepts("html")) {
+      return next();
+    }
+    response.sendFile(path.join(frontendDirectory, "index.html"));
+  });
+}
+
 app.use((_request, response) => response.status(404).json({ error: "Not found" }));
 app.use(backendErrorHandler);
 
